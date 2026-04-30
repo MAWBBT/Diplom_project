@@ -42,6 +42,11 @@ module.exports = (sequelize) => {
     phone: {
       type: DataTypes.STRING(20),
       allowNull: true
+    },
+    isActive: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true
     }
   }, {
     tableName: 'users',

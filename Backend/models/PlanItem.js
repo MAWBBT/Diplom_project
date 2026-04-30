@@ -29,7 +29,19 @@ module.exports = (sequelize) => {
       type: DataTypes.DATEONLY,
       allowNull: true
     },
+    status: {
+      type: DataTypes.STRING(20),
+      allowNull: false,
+      defaultValue: 'planned',
+      validate: {
+        isIn: [['planned', 'in_progress', 'done', 'overdue']]
+      }
+    },
     notes: {
+      type: DataTypes.TEXT,
+      allowNull: true
+    },
+    description: {
       type: DataTypes.TEXT,
       allowNull: true
     },

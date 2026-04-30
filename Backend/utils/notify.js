@@ -11,3 +11,4 @@ async function notifyUser(userId, title, body, link) {
 }
 
 module.exports = { notifyUser };
+

@@ -1,15 +1,12 @@
-const ROLE_TITLES = {
-  admin: 'Администратор',
-  postgraduate: 'Аспирант',
-  professor: 'Профессор',
-  program_admin: 'Администратор программы'
-};
-
 function getRoleTitle(role) {
-  return ROLE_TITLES[role] || role;
+  const map = {
+    admin: 'Администратор',
+    professor: 'Научный руководитель',
+    postgraduate: 'Аспирант',
+    program_admin: 'Администратор программы'
+  };
+  return map[role] || role || 'Пользователь';
 }
 
-module.exports = {
-  ROLE_TITLES,
-  getRoleTitle
-};
+module.exports = { getRoleTitle };
+

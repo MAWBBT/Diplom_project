@@ -56,6 +56,10 @@ router.get('/schedule', requireAuth, requireProfessorOrAdmin, async (req, res) =
         model: User,
         as: 'user',
         attributes: ['id', 'fullName', 'groupName']
+      }, {
+        model: Subject,
+        as: 'subjectRef',
+        attributes: ['id', 'name']
       }],
       where: whereClause,
       order: [['date', 'ASC'], ['time', 'ASC']]
@@ -80,13 +84,17 @@ router.get('/grades/:postgraduateId/:scheduleId', requireAuth, requireProfessorO
       return res.status(403).json({ error: 'Доступ запрещён. Это не ваше занятие.' });
     }
 
+    const whereClause = {
+      userId: postgraduateId,
+      subjectId: schedule.subjectId,
+      controlType: {
+        [Op.like]: `%${schedule.date || schedule.dayOfWeek}%`
+      }
+    };
+
     const grade = await Grade.findOne({
       where: {
-        userId: postgraduateId,
-        subject: schedule.subject,
-        controlType: {
-          [Op.like]: `%${schedule.date || schedule.dayOfWeek}%`
-        }
+        ...whereClause
       },
       order: [['createdAt', 'DESC']]
     });
@@ -122,14 +130,18 @@ router.post('/grade', requireAuth, async (req, res) => {
     // Проверяем, есть ли уже оценка для этого занятия
     // Приоритет отдаем дню недели, если он есть
     const controlTypeStr = schedule.dayOfWeek || (schedule.date ? schedule.date : '');
+    const existingWhere = {
+      userId: postgraduateId,
+      subjectId: schedule.subjectId,
+      [Op.or]: [
+        { controlType: `Занятие ${controlTypeStr}` },
+        { controlType: { [Op.like]: `%${controlTypeStr}%` } }
+      ]
+    };
+
     const existingGrade = await Grade.findOne({
       where: {
-        userId: postgraduateId,
-        subject: schedule.subject,
-        [Op.or]: [
-          { controlType: `Занятие ${controlTypeStr}` },
-          { controlType: { [Op.like]: `%${controlTypeStr}%` } }
-        ]
+        ...existingWhere
       }
     });
 
@@ -146,7 +158,7 @@ router.post('/grade', requireAuth, async (req, res) => {
       const controlTypeValue = schedule.dayOfWeek || (schedule.date ? schedule.date : '');
       const newGrade = await Grade.create({
         userId: postgraduateId,
-        subject: schedule.subject,
+        subjectId: schedule.subjectId,
         controlType: `Занятие ${controlTypeValue}`,
         grade: grade,
         comment: comment || ''
@@ -171,7 +183,7 @@ router.delete('/grade/:gradeId', requireAuth, requireProfessorOrAdmin, async (re
       const schedule = await Schedule.findOne({
         where: {
           userId: grade.userId,
-          subject: grade.subject
+          subjectId: grade.subjectId
         },
         order: [['createdAt', 'DESC']]
       });

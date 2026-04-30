@@ -403,7 +403,7 @@ async function initDatabase() {
       'Аспирантура 2024-3': ['Лаб. 306', 'Ауд. 212', 'Науч. зал 114', 'Коллоквиум 407']
     };
 
-    const createGroupSchedule = (groupPostgraduates, groupName) => {
+    const createGroupSchedule = async (groupPostgraduates, groupName) => {
       let activityCursor = 0;
       for (let dayIndex = 0; dayIndex < weekDays.length; dayIndex += 1) {
         const dayOfWeek = weekDays[dayIndex];
@@ -417,11 +417,17 @@ async function initDatabase() {
           const auditorium = (auditoriumsByGroup[groupName] || [])[pairIndex] || 'Ауд. 101';
 
           for (const pg of groupPostgraduates) {
+            const subjectName = `${item.title} (${item.format})`;
+            // eslint-disable-next-line no-await-in-loop
+            const [subjectRow] = await db.Subject.findOrCreate({
+              where: { name: subjectName },
+              defaults: { name: subjectName }
+            });
             schedules.push(db.Schedule.create({
               userId: pg.id,
               dayOfWeek: dayOfWeek,
               time: time,
-              subject: `${item.title} (${item.format})`,
+              subjectId: subjectRow.id,
               teacher: item.professor.fullName,
               auditorium: auditorium,
               date: date
@@ -435,9 +441,9 @@ async function initDatabase() {
     const group2 = postgraduates.filter(s => s.groupName === 'Аспирантура 2024-2');
     const group3 = postgraduates.filter(s => s.groupName === 'Аспирантура 2024-3');
 
-    createGroupSchedule(group1, 'Аспирантура 2024-1');
-    createGroupSchedule(group2, 'Аспирантура 2024-2');
-    createGroupSchedule(group3, 'Аспирантура 2024-3');
+    await createGroupSchedule(group1, 'Аспирантура 2024-1');
+    await createGroupSchedule(group2, 'Аспирантура 2024-2');
+    await createGroupSchedule(group3, 'Аспирантура 2024-3');
 
     const createdSchedules = await Promise.all(schedules);
     console.log('✅ Расписание создано:', createdSchedules.length, 'занятий');
@@ -515,7 +521,7 @@ async function initDatabase() {
 
         grades.push(db.Grade.create({
           userId: pg.id,
-          subject: subject.name,
+          subjectId: subject.id,
           controlType: `Занятие ${sample.dayOfWeek}`,
           grade: sample.grade,
           comment: sample.comment

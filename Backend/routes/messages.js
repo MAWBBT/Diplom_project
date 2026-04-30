@@ -1,49 +1,81 @@
 const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
+const multer = require('multer');
 const router = express.Router();
 const { Op } = require('sequelize');
 const { requireAuth } = require('../middleware/auth');
-const { Message, User } = require('../models');
+const { Message, User, MessageFile } = require('../models');
 
-function getMessagePartnerRole(userRole) {
-  const map = {
-    postgraduate: 'professor',
-    professor: 'postgraduate',
-    admin: 'professor',
-    program_admin: 'professor'
-  };
-  return map[userRole] || null;
+function canExchangeMessages(_aRole, _bRole) {
+  // Требование модуля 6: переписка между любыми пользователями системы.
+  return true;
 }
 
-function canExchangeMessages(aRole, bRole) {
-  if (aRole === bRole) return false;
-  if (
-    (aRole === 'postgraduate' && bRole === 'professor') ||
-    (aRole === 'professor' && bRole === 'postgraduate')
-  ) {
-    return true;
+function canAccessMessage(user, msg) {
+  if (!user || !msg) return false;
+  if (user.role === 'admin') return true;
+  return msg.senderId === user.id || msg.recipientId === user.id;
+}
+
+const uploadRoot = path.join(__dirname, '../uploads/messages');
+if (!fs.existsSync(uploadRoot)) {
+  fs.mkdirSync(uploadRoot, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, uploadRoot),
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || '').slice(0, 12);
+    cb(null, `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`);
   }
-  if (aRole === 'admin' && ['postgraduate', 'professor'].includes(bRole)) return true;
-  if (bRole === 'admin' && ['postgraduate', 'professor'].includes(aRole)) return true;
-  if (aRole === 'program_admin' && ['postgraduate', 'professor'].includes(bRole)) return true;
-  if (bRole === 'program_admin' && ['postgraduate', 'professor'].includes(aRole)) return true;
-  return false;
-}
+});
+
+const fileFilter = (_req, file, cb) => {
+  const allowedMimes = [
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'image/jpeg',
+    'image/png'
+  ];
+  if (allowedMimes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Недопустимый формат файла'), false);
+  }
+};
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 20 * 1024 * 1024, files: 5 },
+  fileFilter
+});
 
 // GET /api/messages/conversations - Получить список диалогов
 router.get('/conversations', requireAuth, async (req, res) => {
   try {
     const userId = req.user.id;
-    const userRole = req.user.role;
+    const q = req.query.q ? String(req.query.q).trim().toLowerCase() : '';
 
-    const targetRole = getMessagePartnerRole(userRole);
-    if (!targetRole) {
-      return res.json([]);
+    // Любые пользователи, кроме себя; можно фильтровать по ФИО/логину/группе
+    const userWhere = { id: { [Op.ne]: userId } };
+    if (q) {
+      userWhere[Op.or] = [
+        { fullName: { [Op.iLike]: `%${q}%` } },
+        { login: { [Op.iLike]: `%${q}%` } },
+        { groupName: { [Op.iLike]: `%${q}%` } }
+      ];
     }
 
     const allUsers = await User.findAll({
-      where: { role: targetRole },
-      attributes: ['id', 'fullName', 'login', 'groupName'],
-      order: [['fullName', 'ASC']]
+      where: userWhere,
+      attributes: ['id', 'fullName', 'login', 'groupName', 'role'],
+      order: [['fullName', 'ASC']],
+      limit: 200
     });
     
     // Получаем последние сообщения для каждого пользователя
@@ -61,12 +93,22 @@ router.get('/conversations', requireAuth, async (req, res) => {
           { model: User, as: 'recipient', attributes: ['id', 'fullName'] }
         ]
       });
+
+      const unreadCount = await Message.count({
+        where: {
+          senderId: user.id,
+          recipientId: userId,
+          isRead: false
+        }
+      });
       
       return {
         userId: user.id,
         fullName: user.fullName,
         login: user.login,
         groupName: user.groupName,
+        role: user.role,
+        unreadCount,
         lastMessage: lastMessage ? {
           id: lastMessage.id,
           text: lastMessage.text,
@@ -78,7 +120,7 @@ router.get('/conversations', requireAuth, async (req, res) => {
       };
     }));
     
-    res.json(conversations);
+    res.json(conversations.sort((a, b) => (b.unreadCount || 0) - (a.unreadCount || 0)));
   } catch (error) {
     console.error('Ошибка получения диалогов:', error);
     res.status(500).json({ error: 'Внутренняя ошибка сервера' });
@@ -95,14 +137,29 @@ router.get('/:userId', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Неверный ID пользователя' });
     }
     
+    const q = req.query.q ? String(req.query.q).trim() : '';
+    const where = {
+      [Op.or]: [
+        { senderId: userId, recipientId: otherUserId },
+        { senderId: otherUserId, recipientId: userId }
+      ]
+    };
+    if (q) {
+      const qq = `%${q}%`;
+      where[Op.or] = [
+        ...where[Op.or],
+      ];
+      where[Op.and] = [{
+        [Op.or]: [
+          { topic: { [Op.iLike]: qq } },
+          { text: { [Op.iLike]: qq } }
+        ]
+      }];
+    }
+
     // Получаем все сообщения между текущим пользователем и выбранным
     const messages = await Message.findAll({
-      where: {
-        [Op.or]: [
-          { senderId: userId, recipientId: otherUserId },
-          { senderId: otherUserId, recipientId: userId }
-        ]
-      },
+      where,
       include: [
         {
           model: User,
@@ -113,6 +170,11 @@ router.get('/:userId', requireAuth, async (req, res) => {
           model: User,
           as: 'recipient',
           attributes: ['id', 'fullName', 'login']
+        },
+        {
+          model: MessageFile,
+          as: 'files',
+          attributes: ['id', 'originalName', 'mimeType', 'size', 'createdAt']
         }
       ],
       order: [['createdAt', 'ASC']]
@@ -140,7 +202,13 @@ router.get('/:userId', requireAuth, async (req, res) => {
       sender: msg.sender ? msg.sender.fullName : 'Неизвестно',
       recipient: msg.recipient ? msg.recipient.fullName : 'Неизвестно',
       createdAt: msg.createdAt,
-      isRead: msg.isRead
+      isRead: msg.isRead,
+      files: (msg.files || []).map((f) => ({
+        id: f.id,
+        originalName: f.originalName,
+        mimeType: f.mimeType,
+        size: f.size
+      }))
     }));
     
     res.json(formattedMessages);
@@ -192,7 +260,7 @@ router.get('/', requireAuth, async (req, res) => {
 });
 
 // POST /api/messages - Отправить сообщение
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, upload.array('files', 5), async (req, res) => {
   try {
     const senderId = req.user.id;
     const { recipientId, topic, text } = req.body;
@@ -224,11 +292,23 @@ router.post('/', requireAuth, async (req, res) => {
       text
     });
 
+    const files = Array.isArray(req.files) ? req.files : [];
+    for (const f of files) {
+      await MessageFile.create({
+        messageId: message.id,
+        storedName: f.filename,
+        originalName: f.originalname || f.filename,
+        mimeType: f.mimetype,
+        size: f.size
+      });
+    }
+
     // Получаем созданное сообщение с информацией о пользователях
     const createdMessage = await Message.findByPk(message.id, {
       include: [
         { model: User, as: 'sender', attributes: ['id', 'fullName', 'login'] },
-        { model: User, as: 'recipient', attributes: ['id', 'fullName', 'login'] }
+        { model: User, as: 'recipient', attributes: ['id', 'fullName', 'login'] },
+        { model: MessageFile, as: 'files', attributes: ['id', 'originalName', 'mimeType', 'size', 'createdAt'] }
       ]
     });
 
@@ -241,10 +321,37 @@ router.post('/', requireAuth, async (req, res) => {
       sender: createdMessage.sender ? createdMessage.sender.fullName : 'Неизвестно',
       recipient: createdMessage.recipient ? createdMessage.recipient.fullName : 'Неизвестно',
       createdAt: createdMessage.createdAt,
-      isRead: createdMessage.isRead
+      isRead: createdMessage.isRead,
+      files: (createdMessage.files || []).map((f) => ({
+        id: f.id,
+        originalName: f.originalName,
+        mimeType: f.mimeType,
+        size: f.size
+      }))
     });
   } catch (error) {
     console.error('Ошибка отправки сообщения:', error);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+// GET /api/messages/files/:fileId/download - скачать вложение (доступ: участники диалога или admin)
+router.get('/files/:fileId/download', requireAuth, async (req, res) => {
+  try {
+    const file = await MessageFile.findByPk(req.params.fileId);
+    if (!file) return res.status(404).json({ error: 'Файл не найден' });
+
+    const msg = await Message.findByPk(file.messageId);
+    if (!msg) return res.status(404).json({ error: 'Сообщение не найдено' });
+
+    if (!canAccessMessage(req.user, msg)) {
+      return res.status(403).json({ error: 'Нет доступа к файлу' });
+    }
+
+    const fp = path.join(uploadRoot, file.storedName);
+    if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Файл отсутствует на диске' });
+    res.download(fp, file.originalName);
+  } catch (e) {
     res.status(500).json({ error: 'Внутренняя ошибка сервера' });
   }
 });

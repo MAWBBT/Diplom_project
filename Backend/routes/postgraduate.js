@@ -14,12 +14,14 @@ const {
   DissertationTopicHistory,
   IndividualPlan,
   PlanItem,
+  PlanItemFile,
   Milestone,
   Publication,
   Attestation,
   AcademicDocument,
   DocumentFile,
-  Program
+  Program,
+  AttestationFile
 } = require('../models');
 
 const pgOnly = [requireAuth, requireRole('postgraduate')];
@@ -37,12 +39,84 @@ const storage = multer.diskStorage({
   }
 });
 
+const fileFilter = (req, file, cb) => {
+  const allowedMimes = [
+    'application/pdf', 
+    'application/msword', 
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'image/jpeg', 
+    'image/png'
+  ];
+  if (allowedMimes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Недопустимый формат файла'), false);
+  }
+};
+
 const upload = multer({
   storage,
-  limits: { fileSize: 15 * 1024 * 1024 }
+  limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter
 });
 
+const planItemUploadRoot = path.join(__dirname, '../uploads/plan-items');
+if (!fs.existsSync(planItemUploadRoot)) {
+  fs.mkdirSync(planItemUploadRoot, { recursive: true });
+}
+
+const planItemStorage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, planItemUploadRoot),
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || '').slice(0, 12);
+    cb(null, `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`);
+  }
+});
+
+const planItemFileFilter = (_req, file, cb) => {
+  const allowedMimes = [
+    'application/pdf',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'image/jpeg',
+    'image/png'
+  ];
+  if (allowedMimes.includes(file.mimetype)) cb(null, true);
+  else cb(new Error('Недопустимый формат файла'), false);
+};
+
+const uploadPlanItemFile = multer({
+  storage: planItemStorage,
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: planItemFileFilter
+});
+
+async function applyOverdueForUserPlans(userId) {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const plans = await IndividualPlan.findAll({ where: { userId }, attributes: ['id'] });
+    const planIds = plans.map((p) => p.id);
+    if (!planIds.length) return;
+    await PlanItem.update(
+      { status: 'overdue' },
+      {
+        where: {
+          planId: { [require('sequelize').Op.in]: planIds },
+          completedAt: null,
+          dueDate: { [require('sequelize').Op.lt]: today },
+          status: { [require('sequelize').Op.in]: ['planned', 'in_progress'] }
+        }
+      }
+    );
+  } catch {
+    // non-critical
+  }
+}
+
 async function loadDashboardPayload(userId) {
+  await applyOverdueForUserPlans(userId);
   const [
     profile,
     topics,
@@ -60,12 +134,20 @@ async function loadDashboardPayload(userId) {
     DissertationTopic.findAll({ where: { userId }, order: [['updatedAt', 'DESC']] }),
     IndividualPlan.findAll({
       where: { userId },
-      include: [{ model: PlanItem, as: 'items' }],
+      include: [{
+        model: PlanItem,
+        as: 'items',
+        include: [{ model: PlanItemFile, as: 'files' }]
+      }],
       order: [['academicYear', 'DESC']]
     }),
     Milestone.findAll({ where: { userId }, order: [['dueDate', 'ASC']] }),
     Publication.findAll({ where: { userId }, order: [['year', 'DESC'], ['createdAt', 'DESC']] }),
-    Attestation.findAll({ where: { userId }, order: [['attestedAt', 'DESC']] }),
+    Attestation.findAll({
+      where: { userId },
+      include: [{ model: AttestationFile, as: 'files' }],
+      order: [['attestedAt', 'DESC']]
+    }),
     AcademicDocument.findAll({
       where: { userId },
       order: [['updatedAt', 'DESC']],
@@ -90,26 +172,21 @@ async function loadDashboardPayload(userId) {
 }
 
 router.get('/dashboard', ...pgOnly, async (req, res) => {
-  try {
+  
     const data = await loadDashboardPayload(req.user.id);
     res.json(data);
-  } catch (error) {
-    console.error('postgraduate/dashboard:', error);
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.get('/programs', ...pgOnly, async (_req, res) => {
-  try {
+  
     const programs = await Program.findAll({ order: [['name', 'ASC']] });
     res.json(programs);
-  } catch (e) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.put('/profile', ...pgOnly, async (req, res) => {
-  try {
+  
     const { enrollmentYear, department, specialtyCode, studyForm, programId } = req.body;
     let profile = await PostgraduateProfile.findOne({ where: { userId: req.user.id } });
     if (!profile) {
@@ -135,14 +212,11 @@ router.put('/profile', ...pgOnly, async (req, res) => {
       include: [{ model: Program, as: 'program', attributes: ['id', 'code', 'name'] }]
     });
     res.json(fresh);
-  } catch (error) {
-    console.error('postgraduate/profile:', error);
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.post('/milestones', ...pgOnly, async (req, res) => {
-  try {
+  
     const { title, milestoneType, dueDate, status } = req.body;
     if (!title || String(title).trim() === '') {
       return res.status(400).json({ error: 'Укажите название вехи' });
@@ -156,14 +230,11 @@ router.post('/milestones', ...pgOnly, async (req, res) => {
     });
     await writeAudit(req.user.id, 'milestone_create', 'Milestone', m.id, { title: m.title });
     res.status(201).json(m);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.put('/milestones/:id', ...pgOnly, async (req, res) => {
-  try {
+  
     const m = await Milestone.findOne({ where: { id: req.params.id, userId: req.user.id } });
     if (!m) return res.status(404).json({ error: 'Веха не найдена' });
     const { title, milestoneType, dueDate, status } = req.body;
@@ -174,25 +245,21 @@ router.put('/milestones/:id', ...pgOnly, async (req, res) => {
     await m.save();
     await writeAudit(req.user.id, 'milestone_update', 'Milestone', m.id, {});
     res.json(m);
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.delete('/milestones/:id', ...pgOnly, async (req, res) => {
-  try {
+  
     const m = await Milestone.findOne({ where: { id: req.params.id, userId: req.user.id } });
     if (!m) return res.status(404).json({ error: 'Веха не найдена' });
     await m.destroy();
     await writeAudit(req.user.id, 'milestone_delete', 'Milestone', parseInt(req.params.id, 10), {});
     res.status(204).end();
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.post('/publications', ...pgOnly, async (req, res) => {
-  try {
+  
     const { title, venue, year, doi, indexing, status } = req.body;
     if (!title) return res.status(400).json({ error: 'Укажите название' });
     const p = await Publication.create({
@@ -206,13 +273,11 @@ router.post('/publications', ...pgOnly, async (req, res) => {
     });
     await writeAudit(req.user.id, 'publication_create', 'Publication', p.id, {});
     res.status(201).json(p);
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.put('/publications/:id', ...pgOnly, async (req, res) => {
-  try {
+  
     const p = await Publication.findOne({ where: { id: req.params.id, userId: req.user.id } });
     if (!p) return res.status(404).json({ error: 'Не найдено' });
     const { title, venue, year, doi, indexing, status } = req.body;
@@ -224,24 +289,20 @@ router.put('/publications/:id', ...pgOnly, async (req, res) => {
     if (status !== undefined && ['draft', 'submitted', 'verified', 'rejected'].includes(status)) p.status = status;
     await p.save();
     res.json(p);
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.delete('/publications/:id', ...pgOnly, async (req, res) => {
-  try {
+  
     const p = await Publication.findOne({ where: { id: req.params.id, userId: req.user.id } });
     if (!p) return res.status(404).json({ error: 'Не найдено' });
     await p.destroy();
     res.status(204).end();
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.post('/documents', ...pgOnly, async (req, res) => {
-  try {
+  
     const { title, documentType, notes } = req.body;
     if (!title || !documentType) {
       return res.status(400).json({ error: 'Укажите название и тип документа' });
@@ -255,13 +316,11 @@ router.post('/documents', ...pgOnly, async (req, res) => {
     });
     await writeAudit(req.user.id, 'document_create', 'AcademicDocument', d.id, {});
     res.status(201).json(d);
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.put('/documents/:id', ...pgOnly, async (req, res) => {
-  try {
+  
     const d = await AcademicDocument.findOne({ where: { id: req.params.id, userId: req.user.id } });
     if (!d) return res.status(404).json({ error: 'Не найдено' });
     const { title, notes, status } = req.body;
@@ -280,13 +339,11 @@ router.put('/documents/:id', ...pgOnly, async (req, res) => {
     }
     await d.save();
     res.json(d);
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.post('/documents/:id/submit-review', ...pgOnly, async (req, res) => {
-  try {
+  
     const d = await AcademicDocument.findOne({ where: { id: req.params.id, userId: req.user.id } });
     if (!d) return res.status(404).json({ error: 'Не найдено' });
     if (!['draft', 'rejected'].includes(d.status)) {
@@ -295,13 +352,11 @@ router.post('/documents/:id/submit-review', ...pgOnly, async (req, res) => {
     d.status = 'on_review';
     await d.save();
     res.json(d);
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.post('/documents/:id/files', ...pgOnly, upload.single('file'), async (req, res) => {
-  try {
+  
     const d = await AcademicDocument.findOne({ where: { id: req.params.id, userId: req.user.id } });
     if (!d) return res.status(404).json({ error: 'Документ не найден' });
     if (!req.file) return res.status(400).json({ error: 'Файл не передан' });
@@ -314,14 +369,11 @@ router.post('/documents/:id/files', ...pgOnly, upload.single('file'), async (req
       uploadedById: req.user.id
     });
     res.status(201).json(row);
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.get('/documents/:id/files/:fileId/download', ...pgOnly, async (req, res) => {
-  try {
+  
     const d = await AcademicDocument.findOne({ where: { id: req.params.id, userId: req.user.id } });
     if (!d) return res.status(404).json({ error: 'Не найдено' });
     const f = await DocumentFile.findOne({ where: { id: req.params.fileId, documentId: d.id } });
@@ -329,13 +381,11 @@ router.get('/documents/:id/files/:fileId/download', ...pgOnly, async (req, res) 
     const fp = path.join(uploadRoot, f.storedName);
     if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Файл отсутствует на диске' });
     res.download(fp, f.originalName);
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.put('/plans/:planId/submit', ...pgOnly, async (req, res) => {
-  try {
+  
     const plan = await IndividualPlan.findOne({ where: { id: req.params.planId, userId: req.user.id } });
     if (!plan) return res.status(404).json({ error: 'План не найден' });
     if (plan.status !== 'draft') {
@@ -348,13 +398,11 @@ router.put('/plans/:planId/submit', ...pgOnly, async (req, res) => {
       include: [{ model: PlanItem, as: 'items' }]
     });
     res.json(full);
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.post('/plan-items', ...pgOnly, async (req, res) => {
-  try {
+  
     const { planId, title, orderIdx, dueDate, notes } = req.body;
     if (!planId || !title) return res.status(400).json({ error: 'Укажите план и название пункта' });
     const plan = await IndividualPlan.findOne({ where: { id: planId, userId: req.user.id } });
@@ -367,16 +415,55 @@ router.post('/plan-items', ...pgOnly, async (req, res) => {
       title: String(title).trim(),
       orderIdx: orderIdx != null ? parseInt(orderIdx, 10) : 0,
       dueDate: dueDate || null,
-      notes: notes || null
+      notes: notes || null,
+      description: req.body.description || null,
+      status: 'planned'
     });
     res.status(201).json(item);
-  } catch (error) {
+  
+});
+
+// POST /api/postgraduate/plan-items-with-file (multipart) — создание этапа + файл отчёта
+router.post('/plan-items-with-file', ...pgOnly, uploadPlanItemFile.single('file'), async (req, res) => {
+  try {
+    const { planId, title, orderIdx, dueDate, notes, description } = req.body || {};
+    if (!planId || !title) return res.status(400).json({ error: 'Укажите planId и title' });
+    const plan = await IndividualPlan.findOne({ where: { id: planId, userId: req.user.id } });
+    if (!plan) return res.status(404).json({ error: 'План не найден' });
+    if (!['draft', 'rejected'].includes(plan.status)) {
+      return res.status(400).json({ error: 'Пункты можно добавлять только в черновик или после возврата' });
+    }
+
+    const item = await PlanItem.create({
+      planId: plan.id,
+      title: String(title).trim(),
+      orderIdx: orderIdx != null ? parseInt(orderIdx, 10) : 0,
+      dueDate: dueDate || null,
+      notes: notes || null,
+      description: description || null,
+      status: 'planned'
+    });
+
+    if (req.file) {
+      await PlanItemFile.create({
+        planItemId: item.id,
+        storedName: req.file.filename,
+        originalName: req.file.originalname || req.file.filename,
+        mimeType: req.file.mimetype,
+        size: req.file.size,
+        uploadedById: req.user.id
+      });
+    }
+
+    const fresh = await PlanItem.findByPk(item.id, { include: [{ model: PlanItemFile, as: 'files' }] });
+    res.status(201).json(fresh);
+  } catch (e) {
     res.status(500).json({ error: 'Внутренняя ошибка сервера' });
   }
 });
 
 router.put('/plan-items/:id', ...pgOnly, async (req, res) => {
-  try {
+  
     const item = await PlanItem.findByPk(req.params.id, { include: [{ model: IndividualPlan, as: 'plan' }] });
     if (!item || !item.plan || item.plan.userId !== req.user.id) {
       return res.status(404).json({ error: 'Не найдено' });
@@ -384,21 +471,59 @@ router.put('/plan-items/:id', ...pgOnly, async (req, res) => {
     if (!['draft', 'rejected'].includes(item.plan.status)) {
       return res.status(400).json({ error: 'Редактирование пункта недоступно' });
     }
-    const { title, orderIdx, dueDate, notes, completedAt } = req.body;
+    const { title, orderIdx, dueDate, notes, completedAt, description } = req.body;
     if (title !== undefined) item.title = String(title).trim();
     if (orderIdx !== undefined) item.orderIdx = parseInt(orderIdx, 10);
     if (dueDate !== undefined) item.dueDate = dueDate;
     if (notes !== undefined) item.notes = notes;
+    if (description !== undefined) item.description = description;
     if (completedAt !== undefined) item.completedAt = completedAt;
     await item.save();
     res.json(item);
-  } catch (error) {
+  
+});
+
+// POST /api/postgraduate/plan-items/:id/files — загрузить файл отчёта к этапу
+router.post('/plan-items/:id/files', ...pgOnly, uploadPlanItemFile.single('file'), async (req, res) => {
+  try {
+    const item = await PlanItem.findByPk(req.params.id, { include: [{ model: IndividualPlan, as: 'plan' }] });
+    if (!item || !item.plan || item.plan.userId !== req.user.id) return res.status(404).json({ error: 'Не найдено' });
+    if (!['draft', 'rejected'].includes(item.plan.status)) {
+      return res.status(400).json({ error: 'Загрузка файла недоступна' });
+    }
+    if (!req.file) return res.status(400).json({ error: 'Файл не передан' });
+
+    const row = await PlanItemFile.create({
+      planItemId: item.id,
+      storedName: req.file.filename,
+      originalName: req.file.originalname || req.file.filename,
+      mimeType: req.file.mimetype,
+      size: req.file.size,
+      uploadedById: req.user.id
+    });
+    res.status(201).json(row);
+  } catch (e) {
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+// GET /api/postgraduate/plan-items/:id/files/:fileId/download — скачать файл этапа
+router.get('/plan-items/:id/files/:fileId/download', ...pgOnly, async (req, res) => {
+  try {
+    const item = await PlanItem.findByPk(req.params.id, { include: [{ model: IndividualPlan, as: 'plan' }] });
+    if (!item || !item.plan || item.plan.userId !== req.user.id) return res.status(404).json({ error: 'Не найдено' });
+    const f = await PlanItemFile.findOne({ where: { id: req.params.fileId, planItemId: item.id } });
+    if (!f) return res.status(404).json({ error: 'Файл не найден' });
+    const fp = path.join(planItemUploadRoot, f.storedName);
+    if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Файл отсутствует на диске' });
+    res.download(fp, f.originalName);
+  } catch (e) {
     res.status(500).json({ error: 'Внутренняя ошибка сервера' });
   }
 });
 
 router.delete('/plan-items/:id', ...pgOnly, async (req, res) => {
-  try {
+  
     const item = await PlanItem.findByPk(req.params.id, { include: [{ model: IndividualPlan, as: 'plan' }] });
     if (!item || !item.plan || item.plan.userId !== req.user.id) {
       return res.status(404).json({ error: 'Не найдено' });
@@ -408,13 +533,11 @@ router.delete('/plan-items/:id', ...pgOnly, async (req, res) => {
     }
     await item.destroy();
     res.status(204).end();
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.post('/topics', ...pgOnly, async (req, res) => {
-  try {
+  
     const { title } = req.body;
     if (!title || String(title).trim() === '') {
       return res.status(400).json({ error: 'Укажите тему' });
@@ -425,13 +548,11 @@ router.post('/topics', ...pgOnly, async (req, res) => {
       status: 'draft'
     });
     res.status(201).json(t);
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.put('/topics/:id', ...pgOnly, async (req, res) => {
-  try {
+  
     const t = await DissertationTopic.findOne({ where: { id: req.params.id, userId: req.user.id } });
     if (!t) return res.status(404).json({ error: 'Не найдено' });
     const { title, status } = req.body;
@@ -458,13 +579,11 @@ router.put('/topics/:id', ...pgOnly, async (req, res) => {
     }
     await t.save();
     res.json(t);
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.post('/plans', ...pgOnly, async (req, res) => {
-  try {
+  
     const { academicYear } = req.body;
     if (!academicYear) return res.status(400).json({ error: 'Укажите учебный год' });
     const plan = await IndividualPlan.create({
@@ -473,47 +592,39 @@ router.post('/plans', ...pgOnly, async (req, res) => {
       status: 'draft'
     });
     res.status(201).json(plan);
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.get('/topic-history', ...pgOnly, async (req, res) => {
-  try {
+  
     const rows = await DissertationTopicHistory.findAll({
       where: { userId: req.user.id },
       order: [['createdAt', 'DESC']],
       include: [{ model: User, as: 'changedBy', attributes: ['id', 'fullName'] }]
     });
     res.json(rows);
-  } catch (e) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.get('/plan', ...pgOnly, async (req, res) => {
-  try {
+  
     const plans = await IndividualPlan.findAll({
       where: { userId: req.user.id },
       include: [{ model: PlanItem, as: 'items' }],
       order: [['academicYear', 'DESC']]
     });
     res.json(plans);
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 router.get('/topics', ...pgOnly, async (req, res) => {
-  try {
+  
     const topics = await DissertationTopic.findAll({
       where: { userId: req.user.id },
       order: [['updatedAt', 'DESC']]
     });
     res.json(topics);
-  } catch (error) {
-    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
-  }
+  
 });
 
 module.exports = router;

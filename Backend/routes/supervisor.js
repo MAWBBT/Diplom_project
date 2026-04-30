@@ -12,9 +12,13 @@ const {
   DissertationTopic,
   IndividualPlan,
   PlanItem,
+  PlanItemFile,
   Milestone,
   Publication,
   Attestation,
+  AttestationFile,
+  Grade,
+  Subject,
   AcademicDocument,
   DocumentFile,
   Program,
@@ -33,6 +37,28 @@ async function assertSupervises(res, supervisorId, postgraduateId) {
 }
 
 async function loadPostgraduateBundle(postgraduateId) {
+  // Autoupdate overdue plan items for this postgraduate
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const plans = await IndividualPlan.findAll({ where: { userId: postgraduateId }, attributes: ['id'] });
+    const planIds = plans.map((p) => p.id);
+    if (planIds.length) {
+      await PlanItem.update(
+        { status: 'overdue' },
+        {
+          where: {
+            planId: { [Op.in]: planIds },
+            completedAt: null,
+            dueDate: { [Op.lt]: today },
+            status: { [Op.in]: ['planned', 'in_progress'] }
+          }
+        }
+      );
+    }
+  } catch {
+    // non-critical
+  }
+
   const [
     profile,
     topics,
@@ -51,12 +77,20 @@ async function loadPostgraduateBundle(postgraduateId) {
     DissertationTopic.findAll({ where: { userId: postgraduateId }, order: [['updatedAt', 'DESC']] }),
     IndividualPlan.findAll({
       where: { userId: postgraduateId },
-      include: [{ model: PlanItem, as: 'items' }],
+      include: [{
+        model: PlanItem,
+        as: 'items',
+        include: [{ model: PlanItemFile, as: 'files' }]
+      }],
       order: [['academicYear', 'DESC']]
     }),
     Milestone.findAll({ where: { userId: postgraduateId }, order: [['dueDate', 'ASC']] }),
     Publication.findAll({ where: { userId: postgraduateId }, order: [['year', 'DESC']] }),
-    Attestation.findAll({ where: { userId: postgraduateId }, order: [['attestedAt', 'DESC']] }),
+    Attestation.findAll({
+      where: { userId: postgraduateId },
+      include: [{ model: AttestationFile, as: 'files' }],
+      order: [['attestedAt', 'DESC']]
+    }),
     AcademicDocument.findAll({
       where: { userId: postgraduateId },
       include: [{ model: DocumentFile, as: 'files' }],
@@ -148,6 +182,54 @@ router.get('/postgraduate/:userId', ...profOnly, async (req, res) => {
   }
 });
 
+// GET /api/supervisor/grades/:postgraduateId - оценки аспиранта (только для руководителя этого аспиранта)
+router.get('/grades/:postgraduateId', ...profOnly, async (req, res) => {
+  try {
+    const postgraduateId = parseInt(req.params.postgraduateId, 10);
+    if (!postgraduateId) {
+      return res.status(400).json({ error: 'Некорректный postgraduateId' });
+    }
+    if (!await assertSupervises(res, req.user.id, postgraduateId)) return;
+
+    const { subjectId, dateFrom, dateTo, q } = req.query || {};
+    const where = { userId: postgraduateId };
+
+    if (subjectId) where.subjectId = parseInt(subjectId, 10);
+    if (dateFrom || dateTo) {
+      where.createdAt = {};
+      if (dateFrom) where.createdAt[Op.gte] = new Date(String(dateFrom));
+      if (dateTo) {
+        const d = new Date(String(dateTo));
+        d.setHours(23, 59, 59, 999);
+        where.createdAt[Op.lte] = d;
+      }
+    }
+    if (q && String(q).trim()) {
+      const qq = `%${String(q).trim()}%`;
+      where[Op.or] = [
+        { controlType: { [Op.iLike]: qq } },
+        { grade: { [Op.iLike]: qq } },
+        { comment: { [Op.iLike]: qq } }
+      ];
+    }
+
+    const rows = await Grade.findAll({
+      where,
+      include: [{
+        model: Subject,
+        as: 'subjectRef',
+        attributes: ['id', 'name']
+      }],
+      order: [['createdAt', 'DESC']]
+    });
+
+    res.json(rows);
+  } catch (error) {
+    console.error('supervisor/grades:', error);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
 router.patch('/plans/:planId', ...profOnly, async (req, res) => {
   try {
     const plan = await IndividualPlan.findByPk(req.params.planId);
@@ -189,8 +271,20 @@ router.patch('/plan-items/:itemId', ...profOnly, async (req, res) => {
     if (!item || !item.plan) return res.status(404).json({ error: 'Не найдено' });
     if (!await assertSupervises(res, req.user.id, item.plan.userId)) return;
 
-    const { supervisorNotes } = req.body;
+    const { supervisorNotes, status } = req.body;
     if (supervisorNotes !== undefined) item.supervisorNotes = supervisorNotes;
+    if (status !== undefined) {
+      const allowed = ['planned', 'in_progress', 'done'];
+      if (!allowed.includes(status)) {
+        return res.status(400).json({ error: 'status: planned | in_progress | done' });
+      }
+      item.status = status;
+      if (status === 'done') {
+        item.completedAt = new Date().toISOString().slice(0, 10);
+      } else {
+        item.completedAt = null;
+      }
+    }
     await item.save();
     res.json(item);
   } catch (error) {

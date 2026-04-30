@@ -1,0 +1,1 @@
+import{n as e}from"./vendor-B2kT-aMR.js";var t=e(e=>({user:null,token:localStorage.getItem(`token`)||null,setAuth:(t,n)=>{localStorage.setItem(`token`,n),e({user:t,token:n})},setUser:t=>e({user:t}),logout:()=>{localStorage.removeItem(`token`),e({user:null,token:null})}}));export{t};

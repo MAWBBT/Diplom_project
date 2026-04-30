@@ -37,6 +37,14 @@ const DocumentFile = require('./DocumentFile')(sequelize);
 const Notification = require('./Notification')(sequelize);
 const DissertationTopicHistory = require('./DissertationTopicHistory')(sequelize);
 const AuditLog = require('./AuditLog')(sequelize);
+const AttendanceSession = require('./AttendanceSession')(sequelize);
+const AttendanceRecord = require('./AttendanceRecord')(sequelize);
+const MessageFile = require('./MessageFile')(sequelize);
+const CurriculumPlan = require('./CurriculumPlan')(sequelize);
+const CurriculumItem = require('./CurriculumItem')(sequelize);
+const PlanItemFile = require('./PlanItemFile')(sequelize);
+const AttestationFile = require('./AttestationFile')(sequelize);
+const ReportFile = require('./ReportFile')(sequelize);
 
 User.hasMany(Schedule, { foreignKey: 'userId', as: 'schedules' });
 User.hasMany(Grade, { foreignKey: 'userId', as: 'grades' });
@@ -46,6 +54,13 @@ Schedule.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 Grade.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 Message.belongsTo(User, { foreignKey: 'senderId', as: 'sender' });
 Message.belongsTo(User, { foreignKey: 'recipientId', as: 'recipient' });
+Message.hasMany(MessageFile, { foreignKey: 'messageId', as: 'files' });
+MessageFile.belongsTo(Message, { foreignKey: 'messageId', as: 'message' });
+
+Subject.hasMany(Schedule, { foreignKey: 'subjectId', as: 'schedules' });
+Schedule.belongsTo(Subject, { foreignKey: 'subjectId', as: 'subjectRef' });
+Subject.hasMany(Grade, { foreignKey: 'subjectId', as: 'grades' });
+Grade.belongsTo(Subject, { foreignKey: 'subjectId', as: 'subjectRef' });
 
 Program.hasMany(PostgraduateProfile, { foreignKey: 'programId', as: 'profiles' });
 PostgraduateProfile.belongsTo(Program, { foreignKey: 'programId', as: 'program' });
@@ -65,6 +80,10 @@ User.hasMany(IndividualPlan, { foreignKey: 'userId', as: 'individualPlans' });
 IndividualPlan.belongsTo(User, { foreignKey: 'userId', as: 'owner' });
 IndividualPlan.hasMany(PlanItem, { foreignKey: 'planId', as: 'items' });
 PlanItem.belongsTo(IndividualPlan, { foreignKey: 'planId', as: 'plan' });
+PlanItem.hasMany(PlanItemFile, { foreignKey: 'planItemId', as: 'files' });
+PlanItemFile.belongsTo(PlanItem, { foreignKey: 'planItemId', as: 'planItem' });
+PlanItemFile.belongsTo(User, { foreignKey: 'uploadedById', as: 'uploadedBy' });
+User.hasMany(PlanItemFile, { foreignKey: 'uploadedById', as: 'uploadedPlanItemFiles' });
 
 User.hasMany(Milestone, { foreignKey: 'userId', as: 'milestones' });
 Milestone.belongsTo(User, { foreignKey: 'userId', as: 'owner' });
@@ -74,6 +93,12 @@ Publication.belongsTo(User, { foreignKey: 'userId', as: 'author' });
 
 User.hasMany(Attestation, { foreignKey: 'userId', as: 'attestations' });
 Attestation.belongsTo(User, { foreignKey: 'userId', as: 'owner' });
+Attestation.hasMany(AttestationFile, { foreignKey: 'attestationId', as: 'files' });
+AttestationFile.belongsTo(Attestation, { foreignKey: 'attestationId', as: 'attestation' });
+AttestationFile.belongsTo(User, { foreignKey: 'uploadedById', as: 'uploadedBy' });
+User.hasMany(AttestationFile, { foreignKey: 'uploadedById', as: 'uploadedAttestationFiles' });
+User.hasMany(ReportFile, { foreignKey: 'generatedById', as: 'generatedReports' });
+ReportFile.belongsTo(User, { foreignKey: 'generatedById', as: 'generatedBy' });
 
 User.hasMany(AcademicDocument, { foreignKey: 'userId', as: 'academicDocuments' });
 AcademicDocument.belongsTo(User, { foreignKey: 'userId', as: 'owner' });
@@ -81,6 +106,7 @@ AcademicDocument.belongsTo(User, { foreignKey: 'userId', as: 'owner' });
 AcademicDocument.hasMany(DocumentFile, { foreignKey: 'documentId', as: 'files' });
 DocumentFile.belongsTo(AcademicDocument, { foreignKey: 'documentId', as: 'document' });
 DocumentFile.belongsTo(User, { foreignKey: 'uploadedById', as: 'uploadedBy' });
+User.hasMany(DocumentFile, { foreignKey: 'uploadedById', as: 'uploadedFiles' });
 
 User.hasMany(Notification, { foreignKey: 'userId', as: 'notifications' });
 Notification.belongsTo(User, { foreignKey: 'userId', as: 'recipient' });
@@ -88,9 +114,27 @@ Notification.belongsTo(User, { foreignKey: 'userId', as: 'recipient' });
 User.hasMany(DissertationTopicHistory, { foreignKey: 'userId', as: 'topicHistory' });
 DissertationTopicHistory.belongsTo(User, { foreignKey: 'userId', as: 'postgraduate' });
 DissertationTopicHistory.belongsTo(User, { foreignKey: 'changedById', as: 'changedBy' });
+User.hasMany(DissertationTopicHistory, { foreignKey: 'changedById', as: 'topicChangesMade' });
 
 User.hasMany(AuditLog, { foreignKey: 'actorId', as: 'auditActions' });
 AuditLog.belongsTo(User, { foreignKey: 'actorId', as: 'actor' });
+
+Subject.hasMany(AttendanceSession, { foreignKey: 'subjectId', as: 'attendanceSessions' });
+AttendanceSession.belongsTo(Subject, { foreignKey: 'subjectId', as: 'subjectRef' });
+AttendanceSession.belongsTo(User, { foreignKey: 'createdById', as: 'createdBy' });
+
+AttendanceSession.hasMany(AttendanceRecord, { foreignKey: 'sessionId', as: 'records' });
+AttendanceRecord.belongsTo(AttendanceSession, { foreignKey: 'sessionId', as: 'session' });
+AttendanceRecord.belongsTo(User, { foreignKey: 'postgraduateId', as: 'postgraduate' });
+AttendanceRecord.belongsTo(User, { foreignKey: 'markedById', as: 'markedBy' });
+User.hasMany(AttendanceRecord, { foreignKey: 'postgraduateId', as: 'attendanceRecords' });
+
+Program.hasMany(CurriculumPlan, { foreignKey: 'programId', as: 'curriculumPlans' });
+CurriculumPlan.belongsTo(Program, { foreignKey: 'programId', as: 'program' });
+CurriculumPlan.hasMany(CurriculumItem, { foreignKey: 'planId', as: 'items' });
+CurriculumItem.belongsTo(CurriculumPlan, { foreignKey: 'planId', as: 'plan' });
+Subject.hasMany(CurriculumItem, { foreignKey: 'subjectId', as: 'curriculumItems' });
+CurriculumItem.belongsTo(Subject, { foreignKey: 'subjectId', as: 'subjectRef' });
 
 const db = {
   sequelize,
@@ -113,7 +157,15 @@ const db = {
   DocumentFile,
   Notification,
   DissertationTopicHistory,
-  AuditLog
+  AuditLog,
+  AttendanceSession,
+  AttendanceRecord,
+  MessageFile,
+  CurriculumPlan,
+  CurriculumItem,
+  PlanItemFile,
+  AttestationFile,
+  ReportFile
 };
 
 db.sync = async (force = false) => {

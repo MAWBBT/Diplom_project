@@ -14,9 +14,13 @@ module.exports = (sequelize) => {
         key: 'id'
       }
     },
-    subject: {
-      type: DataTypes.STRING(200),
-      allowNull: false
+    subjectId: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      references: {
+        model: 'subjects',
+        key: 'id'
+      }
     },
     controlType: {
       type: DataTypes.STRING(100),

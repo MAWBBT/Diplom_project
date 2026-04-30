@@ -10,8 +10,10 @@ async function writeAudit(actorId, action, entityType, entityId, details) {
       details: details ? (typeof details === 'string' ? details : JSON.stringify(details)) : null
     });
   } catch (e) {
+    // non-critical
     console.error('audit log failed:', e.message);
   }
 }
 
 module.exports = { writeAudit };
+

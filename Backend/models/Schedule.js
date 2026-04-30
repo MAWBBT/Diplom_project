@@ -14,16 +14,20 @@ module.exports = (sequelize) => {
         key: 'id'
       }
     },
+    subjectId: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      references: {
+        model: 'subjects',
+        key: 'id'
+      }
+    },
     dayOfWeek: {
       type: DataTypes.STRING(20),
       allowNull: false
     },
     time: {
       type: DataTypes.STRING(50),
-      allowNull: false
-    },
-    subject: {
-      type: DataTypes.STRING(200),
       allowNull: false
     },
     teacher: {

@@ -1,4 +1,5 @@
 require('dotenv').config();
+require('express-async-errors');
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -33,8 +34,7 @@ const allowedOrigins = new Set(configuredOrigins);
 
 app.use(cors({
   origin(origin, callback) {
-    // Разрешаем server-to-server и локальные вызовы без заголовка Origin
-    if (!origin) return callback(null, true);
+    if (!origin) return callback(null, true); // Allow non-browser clients (like curl, mobile)
     if (allowedOrigins.has(origin)) return callback(null, true);
     return callback(new Error(`CORS blocked for origin: ${origin}`));
   },
@@ -84,13 +84,26 @@ app.use('/api/postgraduate', require('./routes/postgraduate'));
 app.use('/api/supervisor', require('./routes/supervisor'));
 app.use('/api/program-admin', require('./routes/programAdmin'));
 app.use('/api/notifications', require('./routes/notifications'));
+app.use('/api/attestations', require('./routes/attestations'));
+app.use('/api/attendance', require('./routes/attendance'));
+app.use('/api/curriculum', require('./routes/curriculum'));
+app.use('/api/reports', require('./routes/reports'));
 if (staticPath) {
   app.use(express.static(staticPath));
 }
 app.use((err, req, res, next) => {
-  console.error('Ошибка:', err);
-  res.status(err.status || 500).json({
-    error: err.message || 'Внутренняя ошибка сервера'
+  console.error('Глобальная ошибка:', err);
+  
+  if (err.name === 'ZodError') {
+    return res.status(400).json({
+      error: 'Ошибка валидации данных',
+      details: err.flatten().fieldErrors
+    });
+  }
+
+  const status = err.status || 500;
+  res.status(status).json({
+    error: status === 500 ? 'Внутренняя ошибка сервера' : err.message
   });
 });
 app.use((req, res) => {
