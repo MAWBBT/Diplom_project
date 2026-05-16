@@ -4,9 +4,10 @@ const fs = require('fs');
 const crypto = require('crypto');
 const multer = require('multer');
 const router = express.Router();
-const { Op } = require('sequelize');
+const { Op, QueryTypes } = require('sequelize');
 const { requireAuth } = require('../middleware/auth');
-const { Message, User, MessageFile } = require('../models');
+const { Message, User, MessageFile, sequelize } = require('../models');
+const { normalizeUploadFilename, sendFileDownload } = require('../utils/uploadFilename');
 
 function canExchangeMessages(_aRole, _bRole) {
   // Требование модуля 6: переписка между любыми пользователями системы.
@@ -27,7 +28,7 @@ if (!fs.existsSync(uploadRoot)) {
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadRoot),
   filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname || '').slice(0, 12);
+    const ext = path.extname(normalizeUploadFilename(file.originalname || '')).slice(0, 12);
     cb(null, `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`);
   }
 });
@@ -55,72 +56,96 @@ const upload = multer({
   fileFilter
 });
 
-// GET /api/messages/conversations - Получить список диалогов
-router.get('/conversations', requireAuth, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const q = req.query.q ? String(req.query.q).trim().toLowerCase() : '';
+async function buildConversationRow(userId, peer) {
+  const lastMessage = await Message.findOne({
+    where: {
+      [Op.or]: [
+        { senderId: userId, recipientId: peer.id },
+        { senderId: peer.id, recipientId: userId }
+      ]
+    },
+    order: [['createdAt', 'DESC']],
+    include: [
+      { model: User, as: 'sender', attributes: ['id', 'fullName'] },
+      { model: User, as: 'recipient', attributes: ['id', 'fullName'] }
+    ]
+  });
 
-    // Любые пользователи, кроме себя; можно фильтровать по ФИО/логину/группе
-    const userWhere = { id: { [Op.ne]: userId } };
-    if (q) {
-      userWhere[Op.or] = [
-        { fullName: { [Op.iLike]: `%${q}%` } },
-        { login: { [Op.iLike]: `%${q}%` } },
-        { groupName: { [Op.iLike]: `%${q}%` } }
-      ];
+  const unreadCount = await Message.count({
+    where: {
+      senderId: peer.id,
+      recipientId: userId,
+      isRead: false
     }
+  });
 
-    const allUsers = await User.findAll({
-      where: userWhere,
-      attributes: ['id', 'fullName', 'login', 'groupName', 'role'],
-      order: [['fullName', 'ASC']],
-      limit: 200
-    });
-    
-    // Получаем последние сообщения для каждого пользователя
-    const conversations = await Promise.all(allUsers.map(async (user) => {
-      const lastMessage = await Message.findOne({
-        where: {
-          [Op.or]: [
-            { senderId: userId, recipientId: user.id },
-            { senderId: user.id, recipientId: userId }
-          ]
-        },
-        order: [['createdAt', 'DESC']],
-        include: [
-          { model: User, as: 'sender', attributes: ['id', 'fullName'] },
-          { model: User, as: 'recipient', attributes: ['id', 'fullName'] }
-        ]
-      });
-
-      const unreadCount = await Message.count({
-        where: {
-          senderId: user.id,
-          recipientId: userId,
-          isRead: false
-        }
-      });
-      
-      return {
-        userId: user.id,
-        fullName: user.fullName,
-        login: user.login,
-        groupName: user.groupName,
-        role: user.role,
-        unreadCount,
-        lastMessage: lastMessage ? {
+  return {
+    userId: peer.id,
+    fullName: peer.fullName,
+    login: peer.login,
+    groupName: peer.groupName,
+    role: peer.role,
+    unreadCount,
+    lastMessage: lastMessage
+      ? {
           id: lastMessage.id,
           text: lastMessage.text,
           topic: lastMessage.topic,
           createdAt: lastMessage.createdAt,
           isRead: lastMessage.isRead,
           senderId: lastMessage.senderId
-        } : null
-      };
-    }));
-    
-    res.json(conversations.sort((a, b) => (b.unreadCount || 0) - (a.unreadCount || 0)));
+        }
+      : null
+  };
+}
+
+// GET /api/messages/conversations — только реальные диалоги; при q — поиск пользователей для нового диалога
+router.get('/conversations', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const q = req.query.q ? String(req.query.q).trim() : '';
+
+    let peers;
+    if (!q) {
+      const partnerRows = await sequelize.query(
+        `SELECT DISTINCT (CASE WHEN "senderId" = :uid THEN "recipientId" ELSE "senderId" END) AS "partnerId"
+         FROM messages WHERE "senderId" = :uid OR "recipientId" = :uid`,
+        { replacements: { uid: userId }, type: QueryTypes.SELECT }
+      );
+      const ids = partnerRows.map((r) => r.partnerId).filter(Boolean);
+      if (!ids.length) {
+        return res.json([]);
+      }
+      peers = await User.findAll({
+        where: { id: { [Op.in]: ids } },
+        attributes: ['id', 'fullName', 'login', 'groupName', 'role'],
+        order: [['fullName', 'ASC']]
+      });
+    } else {
+      const qq = `%${q}%`;
+      peers = await User.findAll({
+        where: {
+          id: { [Op.ne]: userId },
+          [Op.or]: [
+            { fullName: { [Op.iLike]: qq } },
+            { login: { [Op.iLike]: qq } },
+            { groupName: { [Op.iLike]: qq } }
+          ]
+        },
+        attributes: ['id', 'fullName', 'login', 'groupName', 'role'],
+        order: [['fullName', 'ASC']],
+        limit: 80
+      });
+    }
+
+    const conversations = await Promise.all(peers.map((peer) => buildConversationRow(userId, peer)));
+    conversations.sort((a, b) => {
+      const ta = a.lastMessage ? new Date(a.lastMessage.createdAt).getTime() : 0;
+      const tb = b.lastMessage ? new Date(b.lastMessage.createdAt).getTime() : 0;
+      if (tb !== ta) return tb - ta;
+      return (b.unreadCount || 0) - (a.unreadCount || 0);
+    });
+    res.json(conversations);
   } catch (error) {
     console.error('Ошибка получения диалогов:', error);
     res.status(500).json({ error: 'Внутренняя ошибка сервера' });
@@ -138,26 +163,35 @@ router.get('/:userId', requireAuth, async (req, res) => {
     }
     
     const q = req.query.q ? String(req.query.q).trim() : '';
-    const where = {
-      [Op.or]: [
-        { senderId: userId, recipientId: otherUserId },
-        { senderId: otherUserId, recipientId: userId }
-      ]
-    };
-    if (q) {
-      const qq = `%${q}%`;
-      where[Op.or] = [
-        ...where[Op.or],
-      ];
-      where[Op.and] = [{
-        [Op.or]: [
-          { topic: { [Op.iLike]: qq } },
-          { text: { [Op.iLike]: qq } }
-        ]
-      }];
-    }
+    const threadOr = [
+      { senderId: userId, recipientId: otherUserId },
+      { senderId: otherUserId, recipientId: userId }
+    ];
+    const where = q
+      ? {
+          [Op.and]: [
+            { [Op.or]: threadOr },
+            {
+              [Op.or]: [
+                { topic: { [Op.iLike]: `%${q}%` } },
+                { text: { [Op.iLike]: `%${q}%` } }
+              ]
+            }
+          ]
+        }
+      : { [Op.or]: threadOr };
 
-    // Получаем все сообщения между текущим пользователем и выбранным
+    await Message.update(
+      { isRead: true },
+      {
+        where: {
+          recipientId: userId,
+          senderId: otherUserId,
+          isRead: false
+        }
+      }
+    );
+
     const messages = await Message.findAll({
       where,
       include: [
@@ -179,21 +213,8 @@ router.get('/:userId', requireAuth, async (req, res) => {
       ],
       order: [['createdAt', 'ASC']]
     });
-    
-    // Отмечаем сообщения как прочитанные
-    await Message.update(
-      { isRead: true },
-      {
-        where: {
-          recipientId: userId,
-          senderId: otherUserId,
-          isRead: false
-        }
-      }
-    );
-    
-    // Форматируем ответ
-    const formattedMessages = messages.map(msg => ({
+
+    const formattedMessages = messages.map((msg) => ({
       id: msg.id,
       topic: msg.topic,
       text: msg.text,
@@ -297,7 +318,7 @@ router.post('/', requireAuth, upload.array('files', 5), async (req, res) => {
       await MessageFile.create({
         messageId: message.id,
         storedName: f.filename,
-        originalName: f.originalname || f.filename,
+        originalName: normalizeUploadFilename(f.originalname || f.filename),
         mimeType: f.mimetype,
         size: f.size
       });
@@ -350,7 +371,7 @@ router.get('/files/:fileId/download', requireAuth, async (req, res) => {
 
     const fp = path.join(uploadRoot, file.storedName);
     if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Файл отсутствует на диске' });
-    res.download(fp, file.originalName);
+    sendFileDownload(res, fp, file.originalName);
   } catch (e) {
     res.status(500).json({ error: 'Внутренняя ошибка сервера' });
   }

@@ -1,15 +1,18 @@
 const express = require('express');
 const router = express.Router();
-const { Op } = require('sequelize');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const {
   User,
   PostgraduateProfile,
-  Milestone,
   IndividualPlan,
+  PlanItem,
   AcademicDocument,
   Program
 } = require('../models');
+const {
+  syncAndCountAllOverduePlanItems,
+  syncAndCountOverduePlanItemsForUser
+} = require('../utils/planItemOverdue');
 
 const adminProgOnly = [requireAuth, requireRole('program_admin')];
 
@@ -20,13 +23,7 @@ router.get('/overview', ...adminProgOnly, async (req, res) => {
       User.count({ where: { role: 'professor' } })
     ]);
 
-    const today = new Date().toISOString().slice(0, 10);
-    const overdueMilestones = await Milestone.count({
-      where: {
-        dueDate: { [Op.lt]: today },
-        status: { [Op.notIn]: ['done', 'skipped'] }
-      }
-    });
+    const overduePlanItems = await syncAndCountAllOverduePlanItems(PlanItem, IndividualPlan);
 
     const plansPending = await IndividualPlan.count({ where: { status: 'submitted' } });
     const docsReview = await AcademicDocument.count({ where: { status: 'on_review' } });
@@ -36,7 +33,7 @@ router.get('/overview', ...adminProgOnly, async (req, res) => {
         postgraduates: totalPostgraduates,
         professors: totalProfessors,
         usersTotal: await User.count(),
-        overdueMilestones,
+        overduePlanItems,
         plansPendingApproval: plansPending,
         documentsOnReview: docsReview
       },
@@ -55,27 +52,20 @@ router.get('/postgraduates', ...adminProgOnly, async (req, res) => {
       attributes: { exclude: ['password'] },
       order: [['groupName', 'ASC'], ['fullName', 'ASC']]
     });
-    const today = new Date().toISOString().slice(0, 10);
     const enriched = await Promise.all(
       users.map(async (u) => {
         const profile = await PostgraduateProfile.findOne({
           where: { userId: u.id },
           include: [{ model: Program, as: 'program', attributes: ['code', 'name'] }]
         });
-        const overdue = await Milestone.count({
-          where: {
-            userId: u.id,
-            dueDate: { [Op.lt]: today },
-            status: { [Op.notIn]: ['done', 'skipped'] }
-          }
-        });
+        const overdue = await syncAndCountOverduePlanItemsForUser(PlanItem, IndividualPlan, u.id);
         const pendingPlan = await IndividualPlan.findOne({
           where: { userId: u.id, status: 'submitted' }
         });
         return {
           user: u.toSafeJSON(),
           profile,
-          overdueMilestones: overdue,
+          overduePlanItems: overdue,
           hasPlanPendingApproval: !!pendingPlan
         };
       })
@@ -87,24 +77,32 @@ router.get('/postgraduates', ...adminProgOnly, async (req, res) => {
   }
 });
 
-router.get('/milestones/overdue', ...adminProgOnly, async (req, res) => {
+/** Список просроченных этапов ИУП (admin программы). */
+async function overduePlanItemsListHandler(req, res) {
   try {
-    const today = new Date().toISOString().slice(0, 10);
-    const rows = await Milestone.findAll({
-      where: {
-        dueDate: { [Op.lt]: today },
-        status: { [Op.notIn]: ['done', 'skipped'] }
-      },
-      include: [
-        { model: User, as: 'owner', attributes: ['id', 'fullName', 'groupName', 'email'] }
-      ],
+    await syncAndCountAllOverduePlanItems(PlanItem, IndividualPlan);
+    const rows = await PlanItem.findAll({
+      where: { status: 'overdue' },
+      include: [{
+        model: IndividualPlan,
+        as: 'plan',
+        include: [{
+          model: User,
+          as: 'owner',
+          attributes: ['id', 'fullName', 'groupName', 'email']
+        }]
+      }],
       order: [['dueDate', 'ASC']]
     });
     res.json(rows);
   } catch (error) {
     res.status(500).json({ error: 'Внутренняя ошибка сервера' });
   }
-});
+}
+
+router.get('/plan-items/overdue', ...adminProgOnly, overduePlanItemsListHandler);
+// Алиас: старые клиенты и до перезапуска узла могли обращаться сюда
+router.get('/milestones/overdue', ...adminProgOnly, overduePlanItemsListHandler);
 
 router.get('/export/postgraduates.csv', ...adminProgOnly, async (req, res) => {
   try {

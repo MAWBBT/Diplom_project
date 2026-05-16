@@ -8,7 +8,7 @@ export default function ProgramAdminPage() {
   const [overview, setOverview] = useState(null);
   const [postgraduates, setPostgraduates] = useState([]);
   const [overdue, setOverdue] = useState([]);
-  const [docType, setDocType] = useState("gibdd");
+  const [docType, setDocType] = useState("Для военкомата/отсрочка");
   const [personName, setPersonName] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -22,7 +22,7 @@ export default function ProgramAdminPage() {
         const [o, p, red] = await Promise.all([
           api.get("/program-admin/overview"),
           api.get("/program-admin/postgraduates"),
-          api.get("/program-admin/milestones/overdue"),
+          api.get("/program-admin/plan-items/overdue"),
         ]);
         if (!cancelled) {
           setOverview(o.data);
@@ -77,7 +77,7 @@ export default function ProgramAdminPage() {
     email: item?.user?.email ?? "—",
     specialty: item?.profile?.specialtyCode ?? "—",
     department: item?.profile?.department ?? "—",
-    overdueMilestones: item?.overdueMilestones ?? 0,
+    overduePlanItems: item?.overduePlanItems ?? 0,
     hasPlanPendingApproval: item?.hasPlanPendingApproval ? "Да" : "Нет",
   }));
   const generatedReference = `СПРАВКА\nТип: ${docType}\nФИО: ${personName || "Не указано"}\nДата: ${new Date().toLocaleDateString()}\nСтатус: обучается в аспирантуре`;
@@ -105,7 +105,7 @@ export default function ProgramAdminPage() {
           <Metric title="Всего пользователей" value={counts.usersTotal} />
           <Metric title="Аспирантов" value={counts.postgraduates} />
           <Metric title="Профессоров" value={counts.professors} />
-          <Metric title="Просроченных вех" value={counts.overdueMilestones} highlight={counts.overdueMilestones > 0} />
+          <Metric title="Просроченных этапов" value={counts.overduePlanItems} highlight={counts.overduePlanItems > 0} />
           <Metric title="Планов на согласовании" value={counts.plansPendingApproval} />
           <Metric title="Документов на проверке" value={counts.documentsOnReview} />
         </div>
@@ -122,19 +122,19 @@ export default function ProgramAdminPage() {
         {overdue.length > 0 ? (
           <div className="rounded-xl border border-rose-900/40 bg-rose-950/20 overflow-hidden">
             <SimpleTable
-              rows={overdue.map((m, idx) => ({
-                id: m.id || idx + 1,
-                owner: m.owner?.fullName || "—",
-                groupName: m.owner?.groupName || "—",
-                title: m.title,
-                dueDate: new Date(m.dueDate).toLocaleDateString(),
-                status: m.status,
+              rows={overdue.map((item, idx) => ({
+                id: item.id || idx + 1,
+                owner: item.plan?.owner?.fullName || "—",
+                groupName: item.plan?.owner?.groupName || "—",
+                title: item.title,
+                dueDate: item.dueDate ? new Date(item.dueDate).toLocaleDateString() : "—",
+                status: item.status,
               }))}
             />
           </div>
         ) : (
           <div className="bg-emerald-950/20 border border-emerald-900/40 rounded-xl p-4 text-emerald-300/80 text-sm text-center">
-            Нет просроченных вех. Все аспиранты идут по плану.
+            Нет просроченных этапов. Все аспиранты идут по плану.
           </div>
         )}
       </SectionCard>

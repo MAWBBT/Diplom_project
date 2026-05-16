@@ -11,7 +11,7 @@ const SchedulePage = lazy(() => import("./pages/SchedulePage"));
 const GradesPage = lazy(() => import("./pages/GradesPage"));
 const MessagesPage = lazy(() => import("./pages/MessagesPage"));
 const NotificationsPage = lazy(() => import("./pages/NotificationsPage"));
-const JournalPage = lazy(() => import("./pages/JournalPage"));
+const CommunicationsPage = lazy(() => import("./pages/CommunicationsPage"));
 const AdminPage = lazy(() => import("./pages/AdminPage"));
 const PostgraduatePage = lazy(() => import("./pages/PostgraduatePage"));
 const SupervisorPage = lazy(() => import("./pages/SupervisorPage"));
@@ -19,7 +19,7 @@ const ProgramAdminPage = lazy(() => import("./pages/ProgramAdminPage"));
 const AttestationsPage = lazy(() => import("./pages/AttestationsPage"));
 const AttendancePage = lazy(() => import("./pages/AttendancePage"));
 const AttendanceMyPage = lazy(() => import("./pages/AttendanceMyPage"));
-const CurriculumPage = lazy(() => import("./pages/CurriculumPage"));
+const StudyPage = lazy(() => import("./pages/StudyPage"));
 const ReportsPage = lazy(() => import("./pages/ReportsPage"));
 
 const legacyPageToRoute = {
@@ -30,7 +30,7 @@ const legacyPageToRoute = {
   grades: "/grades",
   messages: "/messages",
   notifications: "/notifications",
-  journal: "/journal",
+  journal: "/grades",
   admin: "/admin",
   postgraduate: "/postgraduate",
   supervisor: "/supervisor",
@@ -91,23 +91,25 @@ export default function App() {
 
     const items = [
       { to: "/profile", label: "Профиль" },
-      { to: "/schedule", label: "Расписание" },
-      { to: "/grades", label: "Оценки" },
-      { to: "/messages", label: "Сообщения" },
-      { to: "/notifications", label: "Уведомления" },
+      { to: "/study", label: "Учёба" },
+      { to: "/grades", label: "Успеваемость" },
+      { to: "/communications", label: "Коммуникации" },
     ];
-    if (["professor", "admin"].includes(user.role)) items.push({ to: "/journal", label: "Журнал" });
     if (["professor", "admin"].includes(user.role)) items.push({ to: "/attestations", label: "Аттестации" });
     if (["professor", "admin"].includes(user.role)) items.push({ to: "/attendance", label: "Посещаемость" });
     if (user.role === "postgraduate") items.push({ to: "/attendance", label: "Посещаемость" });
-    items.push({ to: "/curriculum", label: "Учебный план" });
     if (user.role === "admin") items.push({ to: "/admin", label: "Админка" });
     if (user.role === "admin") items.push({ to: "/reports", label: "Отчётность" });
-    if (user.role === "postgraduate") items.push({ to: "/postgraduate", label: "Кабинет аспиранта" });
-    if (user.role === "professor") items.push({ to: "/supervisor", label: "Руководитель" });
     if (user.role === "program_admin") items.push({ to: "/program-admin", label: "Админ программы" });
 
     return [...base, ...items];
+  }, [user]);
+
+  const cabinetAction = useMemo(() => {
+    if (!user) return null;
+    if (user.role === "professor") return { to: "/supervisor", label: "Кабинет Руководителя" };
+    if (user.role === "postgraduate") return { to: "/postgraduate", label: "Кабинет Аспиранта" };
+    return null;
   }, [user]);
 
   if (loadingAuth) {
@@ -129,86 +131,150 @@ export default function App() {
         />
       ) : null}
 
-      <header className="bg-slate-900/80 border border-slate-700/50 backdrop-blur-md rounded-2xl p-5 flex flex-wrap items-center gap-5 justify-between shadow-[0_20px_60px_rgba(2,6,23,0.5)]">
-        <div className="space-y-2">
-          <div className="inline-flex items-center rounded-full px-3 py-1 text-xs text-sky-200 border border-sky-400/40 bg-sky-600/15">
-            Digital Campus
+      <header className="bg-slate-900/80 border border-slate-700/50 backdrop-blur-md rounded-2xl p-5 shadow-[0_20px_60px_rgba(2,6,23,0.5)] space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-start gap-4 lg:gap-6 justify-between">
+          <div className="space-y-2">
+            <h1 className="text-2xl md:text-3xl font-bold tracking-tight bg-gradient-to-br from-slate-200 via-sky-300 to-blue-300 bg-clip-text text-transparent">
+              Цифровой портал аспирантуры
+            </h1>
+            <p className="text-slate-400 text-sm">Личные кабинеты, журнал, коммуникации и аналитика</p>
           </div>
-          <h1 className="text-2xl md:text-3xl font-bold tracking-tight bg-gradient-to-br from-slate-200 via-sky-300 to-blue-300 bg-clip-text text-transparent">
-            Цифровой портал аспирантуры
-          </h1>
-          <p className="text-slate-400 text-sm">Личные кабинеты, журнал, коммуникации и аналитика</p>
+
+          {user ? (
+            <section className="w-full lg:w-[420px] rounded-2xl border border-slate-700/60 bg-gradient-to-br from-slate-950/35 via-slate-900/45 to-slate-950/20 p-4 shadow-inner">
+              <div className="flex items-start gap-3">
+                <div className="h-11 w-11 rounded-2xl bg-sky-500/15 border border-sky-400/30 grid place-items-center shrink-0">
+                  <span className="text-sky-200 font-black text-sm">
+                    {(user.fullName || user.login || "U").trim().slice(0, 1).toUpperCase()}
+                  </span>
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-slate-200 font-semibold leading-tight truncate">
+                    {user.fullName || user.login}
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold border border-slate-600/70 bg-slate-800/60 text-slate-200">
+                      роль: {user.role}
+                    </span>
+                    {user.groupName ? (
+                      <span className="inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold border border-slate-600/70 bg-slate-800/60 text-slate-200">
+                        группа: {user.groupName}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="mt-2 text-[12px] text-slate-400 truncate">
+                    {user.email || "—"}
+                  </div>
+                </div>
+              </div>
+            </section>
+          ) : null}
         </div>
-        <div className="flex gap-2 flex-wrap">
-          {menu.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.to === "/"}
-              className={({ isActive }) =>
-                `inline-flex items-center no-underline rounded-xl px-4 py-2 text-sm border transition duration-150 ${
-                  isActive
-                    ? "text-slate-950 font-medium border-sky-400 bg-sky-400 shadow-[0_0_20px_rgba(56,189,248,0.3)]"
-                    : "text-slate-200 border-slate-600/65 bg-slate-800/60 hover:bg-slate-700/85 hover:-translate-y-px"
-                }`
-              }
-            >
-              {item.label}
-            </NavLink>
-          ))}
-          {user && (
-            <button
-              onClick={() => { logout(); navigate("/"); }}
-              className="px-4 py-2 rounded-xl text-sm border border-rose-400/70 text-rose-200 hover:bg-rose-500/20 transition-colors"
-            >
-              Выйти
-            </button>
-          )}
+
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 justify-between">
+          <nav aria-label="Основная навигация" className="min-w-0">
+            <ul className="flex gap-2 flex-wrap">
+              {menu.map((item) => (
+                <li key={item.to}>
+                  <NavLink
+                    to={item.to}
+                    end={item.to === "/"}
+                    className={({ isActive }) =>
+                      `inline-flex items-center no-underline rounded-xl px-4 py-2 text-sm border transition duration-150 ${
+                        isActive
+                          ? "text-slate-950 font-medium border-sky-400 bg-sky-400 shadow-[0_0_20px_rgba(56,189,248,0.3)]"
+                          : "text-slate-200 border-slate-600/65 bg-slate-800/60 hover:bg-slate-700/85 hover:-translate-y-px"
+                      }`
+                    }
+                  >
+                    {item.label}
+                  </NavLink>
+                </li>
+              ))}
+            </ul>
+          </nav>
+
+          {user ? (
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {cabinetAction ? (
+                <NavLink
+                  to={cabinetAction.to}
+                  end
+                  className={({ isActive }) =>
+                    `px-4 py-2 rounded-xl text-sm border transition duration-150 ${
+                      isActive
+                        ? "text-slate-950 font-medium border-sky-400 bg-sky-400 shadow-[0_0_20px_rgba(56,189,248,0.3)]"
+                        : "border-slate-600/65 text-slate-200 bg-slate-800/60 hover:bg-slate-700/85 hover:-translate-y-px"
+                    }`
+                  }
+                >
+                  {cabinetAction.label}
+                </NavLink>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => {
+                  logout();
+                  navigate("/");
+                }}
+                className="px-4 py-2 rounded-xl text-sm border border-rose-400/70 text-rose-200 hover:bg-rose-500/20 transition-colors"
+              >
+                Выйти
+              </button>
+            </div>
+          ) : null}
         </div>
       </header>
 
-      {user && (
-        <section className="bg-slate-950/40 border border-slate-700/70 rounded-2xl p-5">
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="rounded-[0.9rem] p-4 border border-slate-600/70 bg-gradient-to-br from-slate-900/80 to-slate-800/70">
-              <p className="text-slate-300 text-xs uppercase tracking-wide">Пользователь</p>
-              <p className="text-sky-100 text-lg font-bold">{user.fullName || user.login}</p>
-            </div>
-            <div className="rounded-[0.9rem] p-4 border border-slate-600/70 bg-gradient-to-br from-slate-900/80 to-slate-800/70">
-              <p className="text-slate-300 text-xs uppercase tracking-wide">Роль</p>
-              <p className="text-sky-100 text-lg font-bold">{user.role}</p>
-            </div>
-            <div className="rounded-[0.9rem] p-4 border border-slate-600/70 bg-gradient-to-br from-slate-900/80 to-slate-800/70">
-              <p className="text-slate-300 text-xs uppercase tracking-wide">Группа</p>
-              <p className="text-sky-100 text-lg font-bold">{user.groupName || "—"}</p>
-            </div>
-            <div className="rounded-[0.9rem] p-4 border border-slate-600/70 bg-gradient-to-br from-slate-900/80 to-slate-800/70">
-              <p className="text-slate-300 text-xs uppercase tracking-wide">Email</p>
-              <p className="text-sky-100 text-lg font-bold">{user.email || "—"}</p>
-            </div>
-          </div>
-        </section>
-      )}
-
       <LegacyRedirect />
       <main id="main" className="contents">
-        <MainContent key={location.pathname} user={user} currentPath={location.pathname} />
+        <MainContent user={user} currentPath={location.pathname} />
       </main>
     </div>
   );
 }
 
 function MainContent({ user, currentPath }) {
-  const needsAuth = !user && currentPath !== "/" && currentPath !== "/login" && currentPath !== "/index.html";
-  if (needsAuth) {
+  const publicPaths = new Set(["/", "/login", "/index.html"]);
+  const protectedPaths = new Set([
+    "/profile",
+    "/schedule",
+    "/study",
+    "/grades",
+    "/messages",
+    "/notifications",
+    "/communications",
+    "/journal",
+    "/admin",
+    "/postgraduate",
+    "/supervisor",
+    "/program-admin",
+    "/attestations",
+    "/attendance",
+    "/curriculum",
+    "/reports",
+  ]);
+
+  if (!user && !publicPaths.has(currentPath)) {
+    if (protectedPaths.has(currentPath)) {
+      return (
+        <PageTransition>
+          <SectionCard title="Требуется авторизация">
+            <p className="text-slate-300 mb-4">Для доступа к разделу выполните вход.</p>
+            <NavLink
+              to="/login"
+              className="rounded-xl px-5 py-3 font-semibold border border-transparent bg-sky-400 font-medium text-slate-950 shadow-[0_8px_24px_rgba(14,165,233,0.35)] hover:shadow-[0_10px_28px_rgba(14,165,233,0.45)] hover:brightness-105 transition-all"
+            >
+              Перейти ко входу
+            </NavLink>
+          </SectionCard>
+        </PageTransition>
+      );
+    }
+
     return (
       <PageTransition>
-        <SectionCard title="Требуется авторизация">
-          <p className="text-slate-300 mb-4">Для доступа к разделу выполните вход.</p>
-          <NavLink to="/login" className="rounded-xl px-5 py-3 font-semibold border border-transparent bg-sky-400 font-medium text-slate-950 shadow-[0_8px_24px_rgba(14,165,233,0.35)] hover:shadow-[0_10px_28px_rgba(14,165,233,0.45)] hover:brightness-105 transition-all">
-            Перейти ко входу
-          </NavLink>
-        </SectionCard>
+        <SectionCard title="Страница не найдена">Выберите раздел из меню.</SectionCard>
       </PageTransition>
     );
   }
@@ -221,20 +287,13 @@ function MainContent({ user, currentPath }) {
           <Route path="/index.html" element={<HomePage />} />
           <Route path="/login" element={<LoginPage />} />
           <Route path="/profile" element={<Guard user={user}><ProfilePage /></Guard>} />
-          <Route path="/schedule" element={<Guard user={user}><SchedulePage /></Guard>} />
+          <Route path="/study" element={<Guard user={user}><StudyPage /></Guard>} />
+          <Route path="/schedule" element={<Navigate to="/study" replace />} />
           <Route path="/grades" element={<Guard user={user}><GradesPage /></Guard>} />
-          <Route path="/messages" element={<Guard user={user}><MessagesPage /></Guard>} />
-          <Route path="/notifications" element={<Guard user={user}><NotificationsPage /></Guard>} />
-          <Route
-            path="/journal"
-            element={
-              <Guard user={user}>
-                <RoleGuard user={user} roles={["professor", "admin"]}>
-                  <JournalPage />
-                </RoleGuard>
-              </Guard>
-            }
-          />
+          <Route path="/journal" element={<Navigate to="/grades" replace state={{ tab: "journal" }} />} />
+          <Route path="/communications" element={<Guard user={user}><CommunicationsPage /></Guard>} />
+          <Route path="/messages" element={<Navigate to="/communications" replace state={{ tab: "messages" }} />} />
+          <Route path="/notifications" element={<Navigate to="/communications" replace state={{ tab: "notifications" }} />} />
           <Route
             path="/admin"
             element={
@@ -301,14 +360,7 @@ function MainContent({ user, currentPath }) {
               </Guard>
             }
           />
-          <Route
-            path="/curriculum"
-            element={
-              <Guard user={user}>
-                <CurriculumPage />
-              </Guard>
-            }
-          />
+          <Route path="/curriculum" element={<Navigate to="/study" replace />} />
           <Route
             path="/reports"
             element={

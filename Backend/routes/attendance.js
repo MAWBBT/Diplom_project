@@ -3,7 +3,9 @@ const router = express.Router();
 const { Op } = require('sequelize');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { userSupervisesPostgraduate } = require('../utils/supervision');
-const { AttendanceSession, AttendanceRecord, User, Subject } = require('../models');
+const { AttendanceSession, AttendanceRecord, User, Subject, Schedule } = require('../models');
+const { scheduleBelongsToProfessor } = require('../utils/professorSubjects');
+const { dedupeScheduleSlots } = require('../utils/scheduleSlots');
 
 function normalizeDateOnly(value) {
   if (!value) return null;
@@ -13,11 +15,90 @@ function normalizeDateOnly(value) {
   return m ? m[1] : null;
 }
 
+const { normName } = require('../utils/scheduleAccess');
+
 function canManageSession(user, session) {
   if (!user || !session) return false;
   if (user.role === 'admin') return true;
-  if (user.role === 'professor') return session.teacher === user.fullName;
+  if (user.role === 'professor') return normName(session.teacher) === normName(user.fullName);
   return false;
+}
+
+function sessionMatchesScheduleSlot(session, scheduleRow) {
+  const groupName = (scheduleRow.user?.groupName || '').trim();
+  const heldOn = normalizeDateOnly(scheduleRow.date);
+  if (!session || !heldOn || !groupName) return false;
+  return (
+    normalizeDateOnly(session.heldOn) === heldOn &&
+    String(session.groupName || '').trim() === groupName &&
+    session.subjectId === scheduleRow.subjectId &&
+    normName(session.teacher) === normName(scheduleRow.teacher) &&
+    String(session.time || '') === String(scheduleRow.time || '')
+  );
+}
+
+async function findSessionForScheduleSlot(scheduleRow, sessionsCache) {
+  if (sessionsCache) {
+    return sessionsCache.find((s) => sessionMatchesScheduleSlot(s, scheduleRow)) || null;
+  }
+  const groupName = (scheduleRow.user?.groupName || '').trim();
+  const heldOn = normalizeDateOnly(scheduleRow.date);
+  if (!heldOn || !groupName) return null;
+  const candidates = await AttendanceSession.findAll({
+    where: { heldOn, groupName, subjectId: scheduleRow.subjectId }
+  });
+  return candidates.find((s) => sessionMatchesScheduleSlot(s, scheduleRow)) || null;
+}
+
+async function openSessionFromSchedule(scheduleId, user) {
+  const schedule = await Schedule.findByPk(scheduleId, {
+    include: [{ model: User, as: 'user', attributes: ['id', 'groupName'] }, { model: Subject, as: 'subjectRef', attributes: ['id', 'name'] }]
+  });
+  if (!schedule) {
+    const err = new Error('Занятие не найдено');
+    err.status = 404;
+    throw err;
+  }
+  if (user.role === 'professor' && !scheduleBelongsToProfessor(schedule, user)) {
+    const err = new Error('Нет доступа к этому занятию');
+    err.status = 403;
+    throw err;
+  }
+  const groupName = (schedule.user?.groupName || '').trim();
+  const heldOn = normalizeDateOnly(schedule.date);
+  if (!heldOn) {
+    const err = new Error('У занятия в расписании нет даты');
+    err.status = 400;
+    throw err;
+  }
+  if (!groupName) {
+    const err = new Error('Не указана группа аспиранта в расписании');
+    err.status = 400;
+    throw err;
+  }
+
+  const existing = await findSessionForScheduleSlot(schedule);
+  if (existing) {
+    return AttendanceSession.findByPk(existing.id, {
+      include: [{ model: Subject, as: 'subjectRef', attributes: ['id', 'name'] }]
+    });
+  }
+
+  const teacher =
+    user.role === 'professor' ? user.fullName : schedule.teacher || user.fullName;
+
+  const created = await AttendanceSession.create({
+    heldOn,
+    groupName,
+    subjectId: schedule.subjectId,
+    teacher,
+    time: schedule.time || null,
+    auditorium: schedule.auditorium || null,
+    createdById: user.id
+  });
+  return AttendanceSession.findByPk(created.id, {
+    include: [{ model: Subject, as: 'subjectRef', attributes: ['id', 'name'] }]
+  });
 }
 
 // POST /api/attendance/sessions - создать занятие для отметки посещаемости (admin, professor)
@@ -47,6 +128,120 @@ router.post('/sessions', requireAuth, requireRole('admin', 'professor'), async (
     res.status(201).json(session);
   } catch (e) {
     console.error('attendance/sessions create:', e);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+// GET /api/attendance/lessons — занятия из расписания (+ уже созданные сессии посещаемости)
+router.get('/lessons', requireAuth, requireRole('admin', 'professor'), async (req, res) => {
+  try {
+    const { dateFrom, dateTo, groupName, subjectId, teacher } = req.query || {};
+    const from = normalizeDateOnly(dateFrom);
+    const to = normalizeDateOnly(dateTo);
+    const groupFilter = groupName && String(groupName).trim() ? String(groupName).trim() : '';
+    const subjectFilter = subjectId ? parseInt(subjectId, 10) : null;
+    const teacherFilter = teacher && String(teacher).trim() ? String(teacher).trim() : '';
+
+    const schedulesRaw = await Schedule.findAll({
+      include: [
+        { model: User, as: 'user', attributes: ['id', 'fullName', 'groupName'] },
+        { model: Subject, as: 'subjectRef', attributes: ['id', 'name'] }
+      ],
+      order: [['date', 'ASC'], ['time', 'ASC']]
+    });
+
+    let slots = schedulesRaw.filter((s) => {
+      if (req.user.role === 'professor' && !scheduleBelongsToProfessor(s, req.user)) return false;
+      if (groupFilter && (s.user?.groupName || '').trim() !== groupFilter) return false;
+      if (subjectFilter && s.subjectId !== subjectFilter) return false;
+      if (teacherFilter && !normName(s.teacher).includes(normName(teacherFilter))) return false;
+      const d = normalizeDateOnly(s.date);
+      if (!d) return false;
+      if (from && d < from) return false;
+      if (to && d > to) return false;
+      return true;
+    });
+
+    slots = dedupeScheduleSlots(slots);
+
+    const sessionWhere = {};
+    if (from || to) {
+      sessionWhere.heldOn = {};
+      if (from) sessionWhere.heldOn[Op.gte] = from;
+      if (to) sessionWhere.heldOn[Op.lte] = to;
+    }
+    if (groupFilter) sessionWhere.groupName = groupFilter;
+    if (subjectFilter) sessionWhere.subjectId = subjectFilter;
+    if (req.user.role === 'professor') {
+      sessionWhere.teacher = req.user.fullName;
+    } else if (teacherFilter) {
+      sessionWhere.teacher = { [Op.iLike]: `%${teacherFilter}%` };
+    }
+
+    const existingSessions = await AttendanceSession.findAll({
+      where: sessionWhere,
+      include: [{ model: Subject, as: 'subjectRef', attributes: ['id', 'name'] }],
+      order: [['heldOn', 'ASC'], ['time', 'ASC']]
+    });
+
+    const lessons = slots.map((slot) => {
+      const matched = existingSessions.find((s) => sessionMatchesScheduleSlot(s, slot));
+      return {
+        scheduleId: slot.id,
+        sessionId: matched?.id || null,
+        heldOn: normalizeDateOnly(slot.date),
+        groupName: (slot.user?.groupName || '').trim(),
+        subjectId: slot.subjectId,
+        subjectRef: slot.subjectRef,
+        teacher: slot.teacher,
+        time: slot.time,
+        auditorium: slot.auditorium,
+        fromSchedule: true
+      };
+    });
+
+    const linkedSessionIds = new Set(lessons.map((l) => l.sessionId).filter(Boolean));
+    for (const s of existingSessions) {
+      if (!linkedSessionIds.has(s.id)) {
+        lessons.push({
+          scheduleId: null,
+          sessionId: s.id,
+          heldOn: normalizeDateOnly(s.heldOn),
+          groupName: s.groupName,
+          subjectId: s.subjectId,
+          subjectRef: s.subjectRef,
+          teacher: s.teacher,
+          time: s.time,
+          auditorium: s.auditorium,
+          fromSchedule: false
+        });
+      }
+    }
+
+    lessons.sort((a, b) => {
+      const da = a.heldOn || '';
+      const db = b.heldOn || '';
+      if (da !== db) return da.localeCompare(db);
+      return String(a.time || '').localeCompare(String(b.time || ''));
+    });
+
+    res.json(lessons);
+  } catch (e) {
+    console.error('attendance/lessons:', e);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+// POST /api/attendance/sessions/from-schedule — открыть занятие по строке расписания
+router.post('/sessions/from-schedule', requireAuth, requireRole('admin', 'professor'), async (req, res) => {
+  try {
+    const scheduleId = parseInt(req.body?.scheduleId, 10);
+    if (!scheduleId) return res.status(400).json({ error: 'Укажите scheduleId' });
+    const session = await openSessionFromSchedule(scheduleId, req.user);
+    res.status(201).json(session);
+  } catch (e) {
+    if (e.status) return res.status(e.status).json({ error: e.message });
+    console.error('attendance/from-schedule:', e);
     res.status(500).json({ error: 'Внутренняя ошибка сервера' });
   }
 });
@@ -133,7 +328,7 @@ router.put('/sessions/:id/mark', requireAuth, requireRole('admin', 'professor'),
     const marks = Array.isArray(req.body?.marks) ? req.body.marks : [];
     if (!marks.length) return res.status(400).json({ error: 'marks пуст' });
 
-    const validStatuses = new Set(['present', 'absent', 'late']);
+    const validStatuses = new Set(['present', 'absent', 'late', 'sick']);
     let updated = 0;
     for (const m of marks) {
       const postgraduateId = parseInt(m.postgraduateId, 10);
@@ -189,7 +384,7 @@ router.get('/my', requireAuth, requireRole('postgraduate'), async (req, res) => 
       limit: 500
     });
 
-    const stats = { present: 0, absent: 0, late: 0, total: records.length };
+    const stats = { present: 0, absent: 0, late: 0, sick: 0, total: records.length };
     for (const r of records) stats[r.status] = (stats[r.status] || 0) + 1;
 
     res.json({ stats, records });
@@ -227,7 +422,7 @@ router.get('/supervised/:postgraduateId', requireAuth, requireRole('professor'),
       order: [[{ model: AttendanceSession, as: 'session' }, 'heldOn', 'DESC'], ['updatedAt', 'DESC']],
       limit: 500
     });
-    const stats = { present: 0, absent: 0, late: 0, total: records.length };
+    const stats = { present: 0, absent: 0, late: 0, sick: 0, total: records.length };
     for (const r of records) stats[r.status] = (stats[r.status] || 0) + 1;
 
     res.json({ stats, records });
@@ -261,7 +456,7 @@ router.get('/admin/summary', requireAuth, requireRole('admin'), async (req, res)
       limit: 20000
     });
 
-    const stats = { present: 0, absent: 0, late: 0, total: records.length };
+    const stats = { present: 0, absent: 0, late: 0, sick: 0, total: records.length };
     for (const r of records) stats[r.status] = (stats[r.status] || 0) + 1;
     res.json({ stats });
   } catch (e) {

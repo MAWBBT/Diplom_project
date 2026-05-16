@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
 import api, { getErrorMessage } from "../api/client";
 import SectionCard from "../components/SectionCard";
-import SimpleTable from "../components/SimpleTable";
 import { useAuthStore } from "../store/authStore";
-import WeekSchedule from "../components/WeekSchedule";
+import WeekSchedule, { mondayOfCalendarWeek } from "../components/WeekSchedule";
+import { canManageScheduleRow } from "../utils/scheduleAccess";
 
 const fieldLabels = {
   dayOfWeek: "День недели (1-7)",
@@ -15,16 +15,19 @@ const fieldLabels = {
   date: "Дата"
 };
 
+/** YYYY-MM-DD для input[type=date] из значения из API */
+function toDateInputValue(raw) {
+  if (raw == null || raw === "") return "";
+  const s = String(raw).trim().split("T")[0];
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : "";
+}
+
 export default function SchedulePage() {
   const { user } = useAuthStore();
   const [rows, setRows] = useState([]);
   const [subjects, setSubjects] = useState([]);
-  const [view, setView] = useState("week"); // week | table
-  const [weekStart, setWeekStart] = useState(() => {
-    const d = new Date();
-    d.setHours(0, 0, 0, 0);
-    return d;
-  });
+  const [weekStart, setWeekStart] = useState(() => mondayOfCalendarWeek(new Date()));
   const [filters, setFilters] = useState({
     groupName: "",
     teacher: "",
@@ -41,17 +44,30 @@ export default function SchedulePage() {
     date: "",
   });
   const [editing, setEditing] = useState(null); // schedule row being edited
+  const editPanelRef = useRef(null);
 
   const canCreate = ["admin", "professor"].includes(user?.role);
+  const isProfessor = user?.role === "professor";
+
+  const canManageRow = (row) => canManageScheduleRow(user, row);
+
+  useEffect(() => {
+    if (isProfessor && user?.fullName) {
+      setForm((s) => ({ ...s, teacher: user.fullName }));
+    }
+  }, [isProfessor, user?.fullName]);
 
   const loadSubjects = async () => {
     try {
-      // For schedule filters and forms we want a subject directory for any authenticated user.
-      // If journal subjects is forbidden for some roles, fallback to empty list.
-      const { data } = await api.get("/journal/subjects");
+      const { data } = await api.get("/curriculum/catalog/subjects");
       setSubjects(Array.isArray(data) ? data : []);
-    } catch (e) {
-      setSubjects([]);
+    } catch {
+      try {
+        const { data } = await api.get("/journal/subjects");
+        setSubjects(Array.isArray(data) ? data : []);
+      } catch {
+        setSubjects([]);
+      }
     }
   };
   const load = async () => {
@@ -81,9 +97,17 @@ export default function SchedulePage() {
     try {
       await api.post("/schedule", {
         ...form,
+        teacher: isProfessor ? user?.fullName : form.teacher,
         subjectId: Number(form.subjectId) || null,
       });
-      setForm({ dayOfWeek: "", time: "", subjectId: "", teacher: "", auditorium: "", date: "" });
+      setForm({
+        dayOfWeek: "",
+        time: "",
+        subjectId: "",
+        teacher: isProfessor ? user?.fullName || "" : "",
+        auditorium: "",
+        date: "",
+      });
       toast.success("Добавлено в расписание");
       load();
     } catch (e) {
@@ -99,6 +123,10 @@ export default function SchedulePage() {
   }, [weekStart]);
 
   const startEdit = (row) => {
+    if (!canManageRow(row)) {
+      toast.error("Нет прав на изменение этой записи");
+      return;
+    }
     setEditing({
       id: row.id,
       dayOfWeek: row.dayOfWeek ?? "",
@@ -106,18 +134,35 @@ export default function SchedulePage() {
       subjectId: String(row.subjectId ?? ""),
       teacher: row.teacher ?? "",
       auditorium: row.auditorium ?? "",
-      date: row.date ?? "",
+      date: toDateInputValue(row.date),
     });
   };
+
+  useEffect(() => {
+    if (!editing?.id) return;
+    const t = requestAnimationFrame(() => {
+      editPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+    return () => cancelAnimationFrame(t);
+  }, [editing?.id]);
 
   const cancelEdit = () => setEditing(null);
 
   const saveEdit = async () => {
     try {
       if (!editing?.id) return;
+      const subjectId = Number(editing.subjectId);
+      if (!Number.isFinite(subjectId) || subjectId <= 0) {
+        toast.error("Выберите дисциплину");
+        return;
+      }
       await api.put(`/schedule/${editing.id}`, {
-        ...editing,
-        subjectId: Number(editing.subjectId) || null,
+        dayOfWeek: editing.dayOfWeek,
+        time: editing.time,
+        subjectId,
+        teacher: isProfessor ? user?.fullName : editing.teacher,
+        auditorium: editing.auditorium,
+        date: editing.date || null,
       });
       toast.success("Занятие обновлено");
       setEditing(null);
@@ -127,10 +172,14 @@ export default function SchedulePage() {
     }
   };
 
-  const removeRow = async (id) => {
+  const removeRow = async (row) => {
     try {
+      if (!canManageRow(row)) {
+        toast.error("Нет прав на удаление этой записи");
+        return;
+      }
       if (!window.confirm("Удалить занятие из расписания?")) return;
-      await api.delete(`/schedule/${id}`);
+      await api.delete(`/schedule/${row.id}`);
       toast.success("Удалено");
       await load();
     } catch (e) {
@@ -144,26 +193,7 @@ export default function SchedulePage() {
       right={
         <div className="flex gap-2 flex-wrap items-center justify-end">
           <button
-            className={`rounded-xl px-4 py-2 font-medium text-sm border transition-colors ${
-              view === "week"
-                ? "border-sky-400 bg-sky-400 text-slate-950"
-                : "border-slate-600 bg-slate-800/80 hover:bg-slate-700 hover:border-slate-500 text-slate-200"
-            }`}
-            onClick={() => setView("week")}
-          >
-            Неделя
-          </button>
-          <button
-            className={`rounded-xl px-4 py-2 font-medium text-sm border transition-colors ${
-              view === "table"
-                ? "border-sky-400 bg-sky-400 text-slate-950"
-                : "border-slate-600 bg-slate-800/80 hover:bg-slate-700 hover:border-slate-500 text-slate-200"
-            }`}
-            onClick={() => setView("table")}
-          >
-            Таблица
-          </button>
-          <button 
+            type="button"
             className="rounded-xl px-4 py-2 font-medium text-sm border border-slate-600 bg-slate-800/80 hover:bg-slate-700 hover:border-slate-500 text-slate-200 transition-colors" 
             onClick={load}
           >
@@ -230,6 +260,11 @@ export default function SchedulePage() {
       {canCreate && (
         <div className="bg-slate-900/40 border border-slate-700/60 rounded-xl p-4 mb-6">
           <h3 className="text-sm font-semibold text-sky-200 mb-4">Добавить занятие</h3>
+          {isProfessor ? (
+            <p className="text-xs text-slate-400 mb-4">
+              Занятие создаётся от вашего имени. Редактировать и удалять можно только строки, где вы указаны преподавателем.
+            </p>
+          ) : null}
           <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3 mb-4">
             <div>
               <input
@@ -268,9 +303,10 @@ export default function SchedulePage() {
             <div>
               <input
                 aria-label={fieldLabels.teacher}
-                className="w-full rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-3 py-2.5 text-sm placeholder:text-slate-400 focus:outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20 shadow-inner"
+                className="w-full rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-3 py-2.5 text-sm placeholder:text-slate-400 focus:outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20 shadow-inner disabled:opacity-70 disabled:cursor-not-allowed"
                 placeholder={fieldLabels.teacher}
                 value={form.teacher}
+                readOnly={isProfessor}
                 onChange={(e) => setForm({ ...form, teacher: e.target.value })}
               />
             </div>
@@ -302,24 +338,34 @@ export default function SchedulePage() {
         </div>
       )}
 
-      {view === "week" ? (
-        <div className="space-y-4">
+      <div className="space-y-4">
           <div className="flex flex-wrap items-end gap-3">
             <div>
-              <div className="text-xs text-slate-400 mb-1">Неделя (начало)</div>
+              <div className="text-xs text-slate-400 mb-1">Учебная неделя (пн–пт), начало</div>
               <input
                 type="date"
                 className="rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-3 py-2 text-sm focus:outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20 shadow-inner"
                 value={weekStartInputValue}
-                onChange={(e) => setWeekStart(new Date(e.target.value))}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (!v) return;
+                  setWeekStart(mondayOfCalendarWeek(new Date(`${v}T12:00:00`)));
+                }}
               />
             </div>
+            <button
+              type="button"
+              className="rounded-xl px-4 py-2 text-sm font-medium border border-emerald-500/40 bg-emerald-950/35 text-emerald-100 hover:bg-emerald-900/45 transition-colors"
+              onClick={() => setWeekStart(mondayOfCalendarWeek(new Date()))}
+            >
+              Текущая неделя
+            </button>
             <button
               className="rounded-xl px-4 py-2 text-sm font-medium border border-slate-600 bg-slate-800/80 hover:bg-slate-700 hover:border-slate-500 text-slate-200 transition-colors"
               onClick={() => {
                 const d = new Date(weekStart);
                 d.setDate(d.getDate() - 7);
-                setWeekStart(d);
+                setWeekStart(mondayOfCalendarWeek(d));
               }}
             >
               ← Пред. неделя
@@ -329,19 +375,22 @@ export default function SchedulePage() {
               onClick={() => {
                 const d = new Date(weekStart);
                 d.setDate(d.getDate() + 7);
-                setWeekStart(d);
+                setWeekStart(mondayOfCalendarWeek(d));
               }}
             >
               След. неделя →
             </button>
           </div>
           <WeekSchedule rows={rows} weekStart={weekStart} />
-        </div>
-      ) : (
-        <div className="space-y-4">
+
           {canCreate ? (
             <div className="rounded-xl border border-slate-700/60 bg-slate-950/35 p-4">
-              <div className="text-slate-300 text-xs uppercase tracking-wider font-semibold mb-3">Управление занятиями</div>
+              <div className="text-slate-300 text-xs uppercase tracking-wider font-semibold mb-1">Управление занятиями</div>
+              {isProfessor ? (
+                <p className="text-xs text-slate-500 mb-3">Кнопки «Править» и «Удалить» только у ваших занятий.</p>
+              ) : (
+                <div className="mb-3" />
+              )}
               <div className="overflow-auto border border-slate-700/70 rounded-xl bg-slate-950/55 shadow-inner">
                 <table className="min-w-full text-sm">
                   <thead className="bg-slate-900/90">
@@ -367,20 +416,26 @@ export default function SchedulePage() {
                         <td className="px-3 py-2.5 text-slate-200">{r.teacher || "—"}</td>
                         <td className="px-3 py-2.5 text-slate-200">{r.auditorium || "—"}</td>
                         <td className="px-3 py-2.5 text-right whitespace-nowrap">
-                          <div className="flex justify-end gap-2">
-                            <button
-                              className="rounded-lg px-3 py-1.5 text-xs font-medium border border-slate-600 bg-slate-800/80 hover:bg-slate-700 text-slate-200"
-                              onClick={() => startEdit(r)}
-                            >
-                              Править
-                            </button>
-                            <button
-                              className="rounded-lg px-3 py-1.5 text-xs font-medium border border-rose-400/60 bg-rose-950/30 hover:bg-rose-950/45 text-rose-100"
-                              onClick={() => removeRow(r.id)}
-                            >
-                              Удалить
-                            </button>
-                          </div>
+                          {canManageRow(r) ? (
+                            <div className="flex justify-end gap-2">
+                              <button
+                                type="button"
+                                className="rounded-lg px-3 py-1.5 text-xs font-medium border border-slate-600 bg-slate-800/80 hover:bg-slate-700 text-slate-200"
+                                onClick={() => startEdit(r)}
+                              >
+                                Править
+                              </button>
+                              <button
+                                type="button"
+                                className="rounded-lg px-3 py-1.5 text-xs font-medium border border-rose-400/60 bg-rose-950/30 hover:bg-rose-950/45 text-rose-100"
+                                onClick={() => removeRow(r)}
+                              >
+                                Удалить
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-slate-500 text-xs">—</span>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -396,7 +451,7 @@ export default function SchedulePage() {
               </div>
 
               {editing ? (
-                <div className="mt-4 rounded-xl border border-slate-700/60 bg-slate-900/40 p-4 space-y-3">
+                <div ref={editPanelRef} className="mt-4 rounded-xl border border-slate-700/60 bg-slate-900/40 p-4 space-y-3">
                   <div className="text-slate-300 text-xs uppercase tracking-wider font-semibold">Редактирование занятия #{editing.id}</div>
                   <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3">
                     <input
@@ -424,8 +479,9 @@ export default function SchedulePage() {
                       ))}
                     </select>
                     <input
-                      className="w-full rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-3 py-2.5 text-sm"
+                      className="w-full rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-3 py-2.5 text-sm disabled:opacity-70"
                       value={editing.teacher}
+                      readOnly={isProfessor}
                       onChange={(e) => setEditing((s) => ({ ...s, teacher: e.target.value }))}
                       placeholder={fieldLabels.teacher}
                     />
@@ -461,10 +517,7 @@ export default function SchedulePage() {
               ) : null}
             </div>
           ) : null}
-
-          <SimpleTable rows={rows} />
-        </div>
-      )}
+      </div>
     </SectionCard>
   );
 }

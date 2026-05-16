@@ -2,9 +2,10 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const ExcelJS = require('exceljs');
 const { Op } = require('sequelize');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { labelEnum } = require('../utils/reportLabels');
+const { addReportSheet, createWorkbook } = require('../utils/reportSheet');
 const {
   ReportFile,
   User,
@@ -13,6 +14,7 @@ const {
   AttendanceSession,
   AttendanceRecord,
   IndividualPlan,
+  PlanItem,
   Attestation
 } = require('../models');
 
@@ -40,39 +42,28 @@ function safeJson(value) {
   }
 }
 
-function styleHeaderRow(ws) {
-  ws.getRow(1).font = { bold: true };
-  ws.getRow(1).alignment = { vertical: 'middle' };
-  ws.columns.forEach((c) => {
-    c.width = Math.min(48, Math.max(12, (c.header ? String(c.header).length : 12) + 4));
-  });
+function createdAtRange(dateFrom, dateTo) {
+  if (!dateFrom && !dateTo) return {};
+  const where = {};
+  if (dateFrom) where[Op.gte] = new Date(`${dateFrom}T00:00:00.000Z`);
+  if (dateTo) where[Op.lte] = new Date(`${dateTo}T23:59:59.999Z`);
+  return { createdAt: where };
 }
 
-async function buildGradesWorkbook({ dateFrom, dateTo }) {
-  const wb = new ExcelJS.Workbook();
-  wb.creator = 'Digital Campus';
-  wb.created = new Date();
-
-  const ws = wb.addWorksheet('Успеваемость');
-  ws.columns = [
-    { header: 'Аспирант', key: 'postgraduate' },
-    { header: 'Группа', key: 'groupName' },
-    { header: 'Дисциплина', key: 'subject' },
-    { header: 'Тип контроля', key: 'controlType' },
-    { header: 'Оценка', key: 'grade' },
-    { header: 'Комментарий', key: 'comment' },
-    { header: 'Дата', key: 'createdAt' }
-  ];
-
+function heldOnRange(dateFrom, dateTo) {
+  if (!dateFrom && !dateTo) return {};
   const where = {};
-  if (dateFrom || dateTo) {
-    where.createdAt = {};
-    if (dateFrom) where.createdAt[Op.gte] = new Date(`${dateFrom}T00:00:00.000Z`);
-    if (dateTo) where.createdAt[Op.lte] = new Date(`${dateTo}T23:59:59.999Z`);
-  }
+  if (dateFrom) where[Op.gte] = dateFrom;
+  if (dateTo) where[Op.lte] = dateTo;
+  return { heldOn: where };
+}
+
+async function buildGradesWorkbook(params) {
+  const { dateFrom, dateTo } = params;
+  const wb = createWorkbook();
 
   const rows = await Grade.findAll({
-    where,
+    where: createdAtRange(dateFrom, dateTo),
     include: [
       { model: Subject, as: 'subjectRef', attributes: ['id', 'name'] },
       { model: User, as: 'user', attributes: ['id', 'fullName', 'groupName'] }
@@ -81,8 +72,20 @@ async function buildGradesWorkbook({ dateFrom, dateTo }) {
     limit: 50000
   });
 
-  for (const r of rows) {
-    ws.addRow({
+  addReportSheet(
+    wb,
+    'Сводная успеваемость',
+    params,
+    [
+      { header: 'Аспирант', key: 'postgraduate' },
+      { header: 'Группа', key: 'groupName' },
+      { header: 'Дисциплина', key: 'subject' },
+      { header: 'Тип контроля', key: 'controlType' },
+      { header: 'Оценка', key: 'grade' },
+      { header: 'Комментарий', key: 'comment' },
+      { header: 'Дата', key: 'createdAt' }
+    ],
+    rows.map((r) => ({
       postgraduate: r.user?.fullName || '',
       groupName: r.user?.groupName || '',
       subject: r.subjectRef?.name || '',
@@ -90,133 +93,162 @@ async function buildGradesWorkbook({ dateFrom, dateTo }) {
       grade: r.grade || '',
       comment: r.comment || '',
       createdAt: r.createdAt ? new Date(r.createdAt).toLocaleString('ru-RU') : ''
-    });
-  }
-  styleHeaderRow(ws);
+    }))
+  );
+
   return wb;
 }
 
-async function buildAttendanceWorkbook({ dateFrom, dateTo }) {
-  const wb = new ExcelJS.Workbook();
-  wb.creator = 'Digital Campus';
-  wb.created = new Date();
-
-  const ws = wb.addWorksheet('Посещаемость');
-  ws.columns = [
-    { header: 'Дата', key: 'heldOn' },
-    { header: 'Группа', key: 'groupName' },
-    { header: 'Дисциплина', key: 'subject' },
-    { header: 'Преподаватель', key: 'teacher' },
-    { header: 'Аспирант', key: 'postgraduate' },
-    { header: 'Статус', key: 'status' },
-    { header: 'Комментарий', key: 'note' }
-  ];
-
-  const whereSession = {};
-  if (dateFrom || dateTo) {
-    whereSession.heldOn = {};
-    if (dateFrom) whereSession.heldOn[Op.gte] = dateFrom;
-    if (dateTo) whereSession.heldOn[Op.lte] = dateTo;
-  }
+async function buildAttendanceWorkbook(params) {
+  const { dateFrom, dateTo } = params;
+  const wb = createWorkbook();
+  const sessionWhere = heldOnRange(dateFrom, dateTo);
 
   const records = await AttendanceRecord.findAll({
     include: [
       {
         model: AttendanceSession,
         as: 'session',
-        where: whereSession,
+        where: Object.keys(sessionWhere).length ? sessionWhere : undefined,
+        required: Object.keys(sessionWhere).length > 0,
         include: [{ model: Subject, as: 'subjectRef', attributes: ['id', 'name'] }]
       },
-      { model: User, as: 'postgraduate', attributes: ['id', 'fullName'] }
+      { model: User, as: 'postgraduate', attributes: ['id', 'fullName', 'groupName'] }
     ],
     order: [[{ model: AttendanceSession, as: 'session' }, 'heldOn', 'DESC']],
     limit: 50000
   });
 
-  for (const r of records) {
-    ws.addRow({
+  addReportSheet(
+    wb,
+    'Сводная посещаемость',
+    params,
+    [
+      { header: 'Дата занятия', key: 'heldOn' },
+      { header: 'Группа', key: 'groupName' },
+      { header: 'Дисциплина', key: 'subject' },
+      { header: 'Преподаватель', key: 'teacher' },
+      { header: 'Аспирант', key: 'postgraduate' },
+      { header: 'Статус', key: 'status' },
+      { header: 'Комментарий', key: 'note' }
+    ],
+    records.map((r) => ({
       heldOn: r.session?.heldOn || '',
       groupName: r.session?.groupName || '',
       subject: r.session?.subjectRef?.name || '',
       teacher: r.session?.teacher || '',
       postgraduate: r.postgraduate?.fullName || '',
-      status: r.status,
+      status: labelEnum(r.status),
       note: r.note || ''
-    });
-  }
-  styleHeaderRow(ws);
+    }))
+  );
+
   return wb;
 }
 
-async function buildPlansWorkbook({ academicYear }) {
-  const wb = new ExcelJS.Workbook();
-  wb.creator = 'Digital Campus';
-  wb.created = new Date();
+async function buildPlansWorkbook(params) {
+  const { academicYear } = params;
+  const wb = createWorkbook();
 
-  const ws = wb.addWorksheet('Индивидуальные планы');
-  ws.columns = [
-    { header: 'Аспирант', key: 'postgraduate' },
-    { header: 'Группа', key: 'groupName' },
-    { header: 'Учебный год', key: 'academicYear' },
-    { header: 'Статус', key: 'status' },
-    { header: 'Обновлено', key: 'updatedAt' }
-  ];
-
-  const where = {};
-  if (academicYear) where.academicYear = String(academicYear).trim();
+  const planWhere = {};
+  if (academicYear) planWhere.academicYear = String(academicYear).trim();
 
   const plans = await IndividualPlan.findAll({
-    where,
+    where: planWhere,
     include: [{ model: User, as: 'owner', attributes: ['id', 'fullName', 'groupName'] }],
     order: [['updatedAt', 'DESC']],
     limit: 50000
   });
 
-  for (const p of plans) {
-    ws.addRow({
+  addReportSheet(
+    wb,
+    'Состояние планов',
+    params,
+    [
+      { header: 'Аспирант', key: 'postgraduate' },
+      { header: 'Группа', key: 'groupName' },
+      { header: 'Учебный год', key: 'academicYear' },
+      { header: 'Статус плана', key: 'status' },
+      { header: 'Обновлено', key: 'updatedAt' }
+    ],
+    plans.map((p) => ({
       postgraduate: p.owner?.fullName || '',
       groupName: p.owner?.groupName || '',
       academicYear: p.academicYear,
-      status: p.status,
+      status: labelEnum(p.status),
       updatedAt: p.updatedAt ? new Date(p.updatedAt).toLocaleString('ru-RU') : ''
-    });
-  }
-  styleHeaderRow(ws);
+    }))
+  );
+
+  const items = await PlanItem.findAll({
+    include: [
+      {
+        model: IndividualPlan,
+        as: 'plan',
+        where: planWhere,
+        required: true,
+        include: [{ model: User, as: 'owner', attributes: ['id', 'fullName', 'groupName'] }]
+      }
+    ],
+    order: [
+      [{ model: IndividualPlan, as: 'plan' }, 'academicYear', 'DESC'],
+      ['orderIdx', 'ASC']
+    ],
+    limit: 50000
+  });
+
+  addReportSheet(
+    wb,
+    'Этапы индивидуальных планов',
+    params,
+    [
+      { header: 'Аспирант', key: 'postgraduate' },
+      { header: 'Группа', key: 'groupName' },
+      { header: 'Учебный год', key: 'academicYear' },
+      { header: 'Этап', key: 'title' },
+      { header: 'Статус этапа', key: 'status' },
+      { header: 'Срок', key: 'dueDate' },
+      { header: 'Выполнено', key: 'completedAt' }
+    ],
+    items.map((it) => ({
+      postgraduate: it.plan?.owner?.fullName || '',
+      groupName: it.plan?.owner?.groupName || '',
+      academicYear: it.plan?.academicYear || '',
+      title: it.title,
+      status: labelEnum(it.status),
+      dueDate: it.dueDate || '',
+      completedAt: it.completedAt || ''
+    }))
+  );
+
   return wb;
 }
 
-async function buildAttestationsWorkbook({ dateFrom, dateTo }) {
-  const wb = new ExcelJS.Workbook();
-  wb.creator = 'Digital Campus';
-  wb.created = new Date();
-
-  const ws = wb.addWorksheet('Аттестации');
-  ws.columns = [
-    { header: 'Аспирант', key: 'postgraduate' },
-    { header: 'Группа', key: 'groupName' },
-    { header: 'Период', key: 'periodLabel' },
-    { header: 'Результат', key: 'decision' },
-    { header: 'Дата аттестации', key: 'attestedAt' },
-    { header: 'Примечания', key: 'notes' },
-    { header: 'Создано', key: 'createdAt' }
-  ];
-
-  const where = {};
-  if (dateFrom || dateTo) {
-    where.createdAt = {};
-    if (dateFrom) where.createdAt[Op.gte] = new Date(`${dateFrom}T00:00:00.000Z`);
-    if (dateTo) where.createdAt[Op.lte] = new Date(`${dateTo}T23:59:59.999Z`);
-  }
+async function buildAttestationsWorkbook(params) {
+  const { dateFrom, dateTo } = params;
+  const wb = createWorkbook();
 
   const rows = await Attestation.findAll({
-    where,
+    where: createdAtRange(dateFrom, dateTo),
     include: [{ model: User, as: 'owner', attributes: ['id', 'fullName', 'groupName'] }],
     order: [['createdAt', 'DESC']],
     limit: 50000
   });
 
-  for (const a of rows) {
-    ws.addRow({
+  addReportSheet(
+    wb,
+    'Результаты аттестаций',
+    params,
+    [
+      { header: 'Аспирант', key: 'postgraduate' },
+      { header: 'Группа', key: 'groupName' },
+      { header: 'Период', key: 'periodLabel' },
+      { header: 'Результат', key: 'decision' },
+      { header: 'Дата аттестации', key: 'attestedAt' },
+      { header: 'Примечания', key: 'notes' },
+      { header: 'Запись создана', key: 'createdAt' }
+    ],
+    rows.map((a) => ({
       postgraduate: a.owner?.fullName || '',
       groupName: a.owner?.groupName || '',
       periodLabel: a.periodLabel,
@@ -224,9 +256,9 @@ async function buildAttestationsWorkbook({ dateFrom, dateTo }) {
       attestedAt: a.attestedAt || '',
       notes: a.notes || '',
       createdAt: a.createdAt ? new Date(a.createdAt).toLocaleString('ru-RU') : ''
-    });
-  }
-  styleHeaderRow(ws);
+    }))
+  );
+
   return wb;
 }
 
@@ -258,7 +290,16 @@ router.post('/generate', ...adminOnly, async (req, res) => {
     const dt = normalizeDateOnly(dateTo);
     const ay = academicYear ? String(academicYear).trim() : null;
 
-    const wb = await spec.builder({ dateFrom: df, dateTo: dt, academicYear: ay });
+    if (df && dt && df > dt) {
+      return res.status(400).json({ error: 'Дата «с» не может быть позже даты «по»' });
+    }
+
+    const filterParams =
+      type === 'plans'
+        ? { academicYear: ay || null }
+        : { dateFrom: df, dateTo: dt };
+
+    const wb = await spec.builder(filterParams);
 
     const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
     const originalName = `${type}-${ts}.xlsx`;
@@ -273,7 +314,7 @@ router.post('/generate', ...adminOnly, async (req, res) => {
       originalName,
       size: stat.size,
       generatedById: req.user.id,
-      params: safeJson({ dateFrom: df, dateTo: dt, academicYear: ay })
+      params: safeJson(filterParams)
     });
 
     res.status(201).json(row);
@@ -292,4 +333,3 @@ router.get('/:id/download', ...adminOnly, async (req, res) => {
 });
 
 module.exports = router;
-

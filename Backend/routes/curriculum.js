@@ -25,6 +25,27 @@ async function resolveProgramIdForUser(user) {
   return null;
 }
 
+// Справочники для любой авторизованной роли (фильтры расписания, просмотр плана по программе)
+router.get('/catalog/programs', requireAuth, async (_req, res) => {
+  try {
+    const programs = await Program.findAll({ order: [['name', 'ASC']], limit: 500 });
+    res.json(programs);
+  } catch (e) {
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+router.get('/catalog/subjects', requireAuth, async (req, res) => {
+  try {
+    const q = req.query.q ? String(req.query.q).trim() : '';
+    const where = q ? { name: { [Op.iLike]: `%${q}%` } } : {};
+    const subjects = await Subject.findAll({ where, order: [['name', 'ASC']], limit: 500 });
+    res.json(subjects);
+  } catch (e) {
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
 // GET /api/curriculum/me - просмотр учебного плана для текущего аспиранта (по programId) или пусто
 router.get('/me', requireAuth, async (req, res) => {
   try {

@@ -22,7 +22,7 @@ module.exports = (sequelize) => {
       allowNull: false,
       defaultValue: 'present',
       validate: {
-        isIn: [['present', 'absent', 'late']]
+        isIn: [['present', 'absent', 'late', 'sick']]
       }
     },
     note: {

@@ -5,9 +5,22 @@ import SectionCard from "../components/SectionCard";
 
 export default function AdminPage() {
   const [users, setUsers] = useState([]);
+  const [audit, setAudit] = useState([]);
   const [form, setForm] = useState({ login: "", password: "", fullName: "", role: "postgraduate" });
   const [q, setQ] = useState("");
   const [roleFilter, setRoleFilter] = useState("");
+
+  const loadAudit = async () => {
+    try {
+      setAudit((await api.get("/admin/audit-log?limit=100")).data || []);
+    } catch (e) {
+      toast.error(getErrorMessage(e));
+    }
+  };
+
+  useEffect(() => {
+    void loadAudit();
+  }, []);
 
   const load = async () => {
     try {
@@ -64,7 +77,8 @@ export default function AdminPage() {
   };
 
   return (
-    <SectionCard title="Администрирование пользователей">
+    <div className="space-y-8">
+      <SectionCard title="Администрирование пользователей">
       <div className="bg-slate-900/40 border border-slate-700/60 rounded-xl p-5 mb-8">
         <h3 className="text-sm font-semibold text-sky-200 mb-4">Создать пользователя</h3>
         <div className="grid md:grid-cols-5 gap-3 items-end">
@@ -166,5 +180,60 @@ export default function AdminPage() {
         {users.length === 0 && <div className="text-center text-slate-500 py-4">Список пользователей пуст</div>}
       </div>
     </SectionCard>
+
+      <SectionCard
+        title="Журнал аудита"
+        right={
+          <button
+            type="button"
+            className="rounded-xl px-4 py-2 font-medium text-sm border border-slate-600 bg-slate-800/80 hover:bg-slate-700 hover:border-slate-500 text-slate-200 transition-colors"
+            onClick={() => void loadAudit()}
+          >
+            Обновить
+          </button>
+        }
+      >
+        <div className="rounded-xl border border-slate-700/70 bg-slate-950/55 shadow-inner overflow-auto max-h-[420px]">
+          <table className="min-w-full text-sm">
+            <thead className="bg-slate-900/90 sticky top-0">
+              <tr>
+                <th className="px-3 py-3 text-left text-[11px] uppercase tracking-wide text-slate-400 font-medium">Когда</th>
+                <th className="px-3 py-3 text-left text-[11px] uppercase tracking-wide text-slate-400 font-medium">Кто</th>
+                <th className="px-3 py-3 text-left text-[11px] uppercase tracking-wide text-slate-400 font-medium">Действие</th>
+                <th className="px-3 py-3 text-left text-[11px] uppercase tracking-wide text-slate-400 font-medium">Сущность</th>
+                <th className="px-3 py-3 text-left text-[11px] uppercase tracking-wide text-slate-400 font-medium">Детали</th>
+              </tr>
+            </thead>
+            <tbody>
+              {audit.map((row) => (
+                <tr key={row.id} className="border-t border-slate-800 hover:bg-sky-950/20">
+                  <td className="px-3 py-2 text-slate-400 whitespace-nowrap">
+                    {row.createdAt ? new Date(row.createdAt).toLocaleString("ru-RU") : "—"}
+                  </td>
+                  <td className="px-3 py-2 text-slate-200">
+                    {row.actor?.fullName || row.actor?.login || "—"}
+                  </td>
+                  <td className="px-3 py-2 text-sky-200/90">{row.action}</td>
+                  <td className="px-3 py-2 text-slate-300">
+                    {row.entityType}
+                    {row.entityId != null ? ` #${row.entityId}` : ""}
+                  </td>
+                  <td className="px-3 py-2 text-slate-400 max-w-[280px] truncate" title={row.details || ""}>
+                    {row.details || "—"}
+                  </td>
+                </tr>
+              ))}
+              {!audit.length ? (
+                <tr className="border-t border-slate-800">
+                  <td colSpan={5} className="px-4 py-10 text-center text-slate-400">
+                    Записей аудита пока нет.
+                  </td>
+                </tr>
+              ) : null}
+            </tbody>
+          </table>
+        </div>
+      </SectionCard>
+    </div>
   );
 }

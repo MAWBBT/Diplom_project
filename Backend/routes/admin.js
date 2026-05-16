@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
-const { User, Schedule, Grade, Message, Subject, Supervision } = require('../models');
+const { User, Schedule, Grade, Message, Subject, Supervision, AuditLog } = require('../models');
 
 const ALLOWED_ROLES = ['admin', 'postgraduate', 'professor', 'program_admin'];
 
@@ -332,6 +332,19 @@ router.patch('/supervisions/:id', requireAuth, requireAdmin, async (req, res) =>
   if (endedAt !== undefined) row.endedAt = endedAt;
   await row.save();
   res.json(row);
+});
+
+// GET /api/admin/audit-log — журнал действий (аудит)
+router.get('/audit-log', requireAuth, requireAdmin, async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 80, 200);
+  const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+  const rows = await AuditLog.findAll({
+    order: [['createdAt', 'DESC']],
+    limit,
+    offset,
+    include: [{ model: User, as: 'actor', attributes: ['id', 'login', 'fullName', 'role'] }]
+  });
+  res.json(rows);
 });
 
 module.exports = router;

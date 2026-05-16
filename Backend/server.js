@@ -62,7 +62,11 @@ app.get('/api', (req, res) => {
       postgraduate: '/api/postgraduate',
       supervisor: '/api/supervisor',
       programAdmin: '/api/program-admin',
-      notifications: '/api/notifications'
+      notifications: '/api/notifications',
+      attestations: '/api/attestations',
+      attendance: '/api/attendance',
+      curriculum: '/api/curriculum',
+      reports: '/api/reports'
     }
   });
 });

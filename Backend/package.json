@@ -7,6 +7,7 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "init-db": "node scripts/init-db.js",
+    "refresh-schedules": "node scripts/refresh-schedules.js",
     "test": "jest"
   },
   "keywords": [

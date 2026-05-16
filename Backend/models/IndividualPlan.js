@@ -23,6 +23,15 @@ module.exports = (sequelize) => {
       validate: {
         isIn: [['draft', 'submitted', 'approved', 'rejected', 'archived']]
       }
+    },
+    rejectReason: {
+      type: DataTypes.TEXT,
+      allowNull: true
+    },
+    dissertationTopicId: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: { model: 'dissertation_topics', key: 'id' }
     }
   }, {
     tableName: 'individual_plans',

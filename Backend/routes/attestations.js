@@ -9,6 +9,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const { userSupervisesPostgraduate } = require('../utils/supervision');
 const { notifyUser } = require('../utils/notify');
 const { writeAudit } = require('../utils/audit');
+const { normalizeUploadFilename, sendFileDownload } = require('../utils/uploadFilename');
 const { Attestation, AttestationFile, User } = require('../models');
 
 function normalizeDateOnly(value) {
@@ -42,7 +43,7 @@ if (!fs.existsSync(uploadRoot)) {
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadRoot),
   filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname || '').slice(0, 12);
+    const ext = path.extname(normalizeUploadFilename(file.originalname || '')).slice(0, 12);
     cb(null, `${Date.now()}-${crypto.randomBytes(8).toString('hex')}${ext}`);
   }
 });
@@ -169,7 +170,7 @@ router.post('/:id/files', requireAuth, requireRole('professor', 'admin'), upload
     const row = await AttestationFile.create({
       attestationId: att.id,
       storedName: req.file.filename,
-      originalName: req.file.originalname || req.file.filename,
+      originalName: normalizeUploadFilename(req.file.originalname || req.file.filename),
       mimeType: req.file.mimetype,
       size: req.file.size,
       uploadedById: req.user.id
@@ -208,7 +209,7 @@ router.get('/:id/files/:fileId/download', requireAuth, async (req, res) => {
     if (!f) return res.status(404).json({ error: 'Файл не найден' });
     const fp = path.join(uploadRoot, f.storedName);
     if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Файл отсутствует на диске' });
-    res.download(fp, f.originalName);
+    sendFileDownload(res, fp, f.originalName);
   } catch (e) {
     res.status(500).json({ error: 'Внутренняя ошибка сервера' });
   }

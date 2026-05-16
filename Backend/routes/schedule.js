@@ -3,6 +3,7 @@ const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
 const { Schedule, User, Subject } = require('../models');
 const { Op } = require('sequelize');
+const { normName, canManageScheduleRow } = require('../utils/scheduleAccess');
 
 function normalizeDateOnly(value) {
   if (!value) return null;
@@ -10,16 +11,6 @@ function normalizeDateOnly(value) {
   if (!s) return null;
   const m = s.match(/^(\d{4}-\d{2}-\d{2})/);
   return m ? m[1] : null;
-}
-
-function canManageScheduleRow(user, row) {
-  if (!user || !row) return false;
-  if (user.role === 'admin') return true;
-  if (user.role === 'professor') {
-    // Simple ownership rule: professor can manage only own lessons (by teacher name match)
-    return !!row.teacher && row.teacher === user.fullName;
-  }
-  return false;
 }
 
 // GET /api/schedule - Получить расписание
@@ -95,10 +86,22 @@ router.post('/', requireAuth, async (req, res) => {
       return res.status(403).json({ error: 'Недостаточно прав' });
     }
 
-    const { userId, dayOfWeek, time, subjectId, teacher, auditorium, date } = req.body;
+    let { userId, dayOfWeek, time, subjectId, teacher, auditorium, date } = req.body;
 
     if (!dayOfWeek || !time || !subjectId) {
       return res.status(400).json({ error: 'День недели, время и предмет обязательны' });
+    }
+
+    if (req.user.role === 'professor') {
+      const me = String(req.user.fullName || '').trim();
+      if (!me) {
+        return res.status(400).json({ error: 'В профиле не указано ФИО преподавателя' });
+      }
+      const requested = String(teacher || '').trim();
+      if (requested && normName(requested) !== normName(me)) {
+        return res.status(403).json({ error: 'Можно создавать занятия только от своего имени' });
+      }
+      teacher = me;
     }
 
     const schedule = await Schedule.create({
@@ -108,7 +111,7 @@ router.post('/', requireAuth, async (req, res) => {
       subjectId,
       teacher,
       auditorium,
-      date
+      date: normalizeDateOnly(date)
     });
 
     res.status(201).json(schedule);
@@ -139,9 +142,22 @@ router.put('/:id', requireAuth, async (req, res) => {
     if (dayOfWeek !== undefined) row.dayOfWeek = dayOfWeek;
     if (time !== undefined) row.time = time;
     if (subjectId !== undefined) row.subjectId = subjectId;
-    if (teacher !== undefined) row.teacher = teacher;
+    if (teacher !== undefined) {
+      if (req.user.role === 'professor') {
+        const me = String(req.user.fullName || '').trim();
+        if (normName(teacher) !== normName(me)) {
+          return res.status(403).json({ error: 'Нельзя переназначить занятие другому преподавателю' });
+        }
+        row.teacher = me;
+      } else {
+        row.teacher = teacher;
+      }
+    }
     if (auditorium !== undefined) row.auditorium = auditorium;
-    if (date !== undefined) row.date = date;
+    if (date !== undefined) {
+      if (date === null || date === '') row.date = null;
+      else row.date = normalizeDateOnly(date);
+    }
 
     await row.save();
     res.json(row);

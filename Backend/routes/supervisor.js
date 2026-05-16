@@ -1,5 +1,9 @@
 const express = require('express');
+const path = require('path');
+const fs = require('fs');
 const router = express.Router();
+
+const planItemUploadRoot = path.join(__dirname, '../uploads/plan-items');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { Op } = require('sequelize');
 const { userSupervisesPostgraduate } = require('../utils/supervision');
@@ -13,7 +17,6 @@ const {
   IndividualPlan,
   PlanItem,
   PlanItemFile,
-  Milestone,
   Publication,
   Attestation,
   AttestationFile,
@@ -24,6 +27,8 @@ const {
   Program,
   DissertationTopicHistory
 } = require('../models');
+const { markOverduePlanItems, calendarTodayISO, dateOnlyString } = require('../utils/planItemOverdue');
+const { sendFileDownload } = require('../utils/uploadFilename');
 
 const profOnly = [requireAuth, requireRole('professor')];
 
@@ -39,22 +44,9 @@ async function assertSupervises(res, supervisorId, postgraduateId) {
 async function loadPostgraduateBundle(postgraduateId) {
   // Autoupdate overdue plan items for this postgraduate
   try {
-    const today = new Date().toISOString().slice(0, 10);
     const plans = await IndividualPlan.findAll({ where: { userId: postgraduateId }, attributes: ['id'] });
     const planIds = plans.map((p) => p.id);
-    if (planIds.length) {
-      await PlanItem.update(
-        { status: 'overdue' },
-        {
-          where: {
-            planId: { [Op.in]: planIds },
-            completedAt: null,
-            dueDate: { [Op.lt]: today },
-            status: { [Op.in]: ['planned', 'in_progress'] }
-          }
-        }
-      );
-    }
+    await markOverduePlanItems(PlanItem, planIds);
   } catch {
     // non-critical
   }
@@ -63,7 +55,6 @@ async function loadPostgraduateBundle(postgraduateId) {
     profile,
     topics,
     plans,
-    milestones,
     publications,
     attestations,
     documents,
@@ -77,14 +68,20 @@ async function loadPostgraduateBundle(postgraduateId) {
     DissertationTopic.findAll({ where: { userId: postgraduateId }, order: [['updatedAt', 'DESC']] }),
     IndividualPlan.findAll({
       where: { userId: postgraduateId },
-      include: [{
-        model: PlanItem,
-        as: 'items',
-        include: [{ model: PlanItemFile, as: 'files' }]
-      }],
+      include: [
+        {
+          model: DissertationTopic,
+          as: 'dissertationTopic',
+          attributes: ['id', 'title', 'status']
+        },
+        {
+          model: PlanItem,
+          as: 'items',
+          include: [{ model: PlanItemFile, as: 'files' }]
+        }
+      ],
       order: [['academicYear', 'DESC']]
     }),
-    Milestone.findAll({ where: { userId: postgraduateId }, order: [['dueDate', 'ASC']] }),
     Publication.findAll({ where: { userId: postgraduateId }, order: [['year', 'DESC']] }),
     Attestation.findAll({
       where: { userId: postgraduateId },
@@ -93,7 +90,10 @@ async function loadPostgraduateBundle(postgraduateId) {
     }),
     AcademicDocument.findAll({
       where: { userId: postgraduateId },
-      include: [{ model: DocumentFile, as: 'files' }],
+      include: [
+        { model: IndividualPlan, as: 'individualPlan', attributes: ['id', 'academicYear', 'status'] },
+        { model: DocumentFile, as: 'files' }
+      ],
       order: [['updatedAt', 'DESC']]
     }),
     Supervision.findAll({
@@ -119,7 +119,6 @@ async function loadPostgraduateBundle(postgraduateId) {
     profile,
     dissertationTopics: topics,
     individualPlans: plans,
-    milestones,
     publications,
     attestations,
     documents,
@@ -236,7 +235,7 @@ router.patch('/plans/:planId', ...profOnly, async (req, res) => {
     if (!plan) return res.status(404).json({ error: 'План не найден' });
     if (!await assertSupervises(res, req.user.id, plan.userId)) return;
 
-    const { status } = req.body;
+    const { status, rejectReason } = req.body;
     if (!status || !['approved', 'rejected', 'archived'].includes(status)) {
       return res.status(400).json({ error: 'Укажите status: approved | rejected | archived' });
     }
@@ -244,18 +243,28 @@ router.patch('/plans/:planId', ...profOnly, async (req, res) => {
       return res.status(400).json({ error: 'Утверждать можно только отправленный план' });
     }
     plan.status = status;
+    if (status === 'rejected') {
+      const reason = rejectReason != null ? String(rejectReason).trim() : '';
+      if (!reason) {
+        return res.status(400).json({ error: 'Укажите причину возврата плана на доработку' });
+      }
+      plan.rejectReason = reason;
+    }
+    if (status === 'approved') plan.rejectReason = null;
     await plan.save();
-    await notifyUser(
-      plan.userId,
-      'Индивидуальный план',
+    const notificationBody =
       status === 'approved'
         ? `Ваш ИПР на ${plan.academicYear} утверждён научным руководителем.`
-        : `ИПР на ${plan.academicYear} возвращён на доработку.`,
-      '/postgraduate.html'
-    );
+        : status === 'rejected'
+          ? `ИПР на ${plan.academicYear} возвращён на доработку.${plan.rejectReason ? ` Комментарий: ${plan.rejectReason}` : ''}`
+          : `ИПР на ${plan.academicYear} переведён в архив.`;
+    await notifyUser(plan.userId, 'Индивидуальный план', notificationBody, '/postgraduate.html');
     await writeAudit(req.user.id, `plan_${status}`, 'IndividualPlan', plan.id, { postgraduateId: plan.userId });
     const full = await IndividualPlan.findByPk(plan.id, {
-      include: [{ model: PlanItem, as: 'items' }]
+      include: [
+        { model: DissertationTopic, as: 'dissertationTopic', attributes: ['id', 'title', 'status'] },
+        { model: PlanItem, as: 'items' }
+      ]
     });
     res.json(full);
   } catch (error) {
@@ -271,8 +280,46 @@ router.patch('/plan-items/:itemId', ...profOnly, async (req, res) => {
     if (!item || !item.plan) return res.status(404).json({ error: 'Не найдено' });
     if (!await assertSupervises(res, req.user.id, item.plan.userId)) return;
 
-    const { supervisorNotes, status } = req.body;
-    if (supervisorNotes !== undefined) item.supervisorNotes = supervisorNotes;
+    const planStatus = item.plan.status;
+    const canEditContent = planStatus === 'submitted';
+
+    const { supervisorNotes, status, title, description, dueDate, notes, orderIdx } = req.body || {};
+
+    if (title !== undefined && canEditContent) {
+      const t = String(title).trim();
+      if (!t) return res.status(400).json({ error: 'Название этапа не может быть пустым' });
+      item.title = t;
+    } else if (title !== undefined && !canEditContent) {
+      return res.status(400).json({ error: 'Правки текста этапа доступны только для плана «на согласовании»' });
+    }
+
+    if (description !== undefined && canEditContent) {
+      item.description = description === null || description === '' ? null : String(description);
+    } else if (description !== undefined && !canEditContent) {
+      return res.status(400).json({ error: 'Правки описания доступны только для плана «на согласовании»' });
+    }
+
+    if (dueDate !== undefined && canEditContent) {
+      item.dueDate = dueDate === null || dueDate === '' ? null : String(dueDate).trim().slice(0, 10);
+    } else if (dueDate !== undefined && !canEditContent) {
+      return res.status(400).json({ error: 'Правки дедлайна доступны только для плана «на согласовании»' });
+    }
+
+    if (notes !== undefined && canEditContent) {
+      item.notes = notes === null || notes === '' ? null : String(notes);
+    } else if (notes !== undefined && !canEditContent) {
+      return res.status(400).json({ error: 'Правки примечаний доступны только для плана «на согласовании»' });
+    }
+
+    if (orderIdx !== undefined && canEditContent) {
+      const n = parseInt(orderIdx, 10);
+      if (Number.isFinite(n)) item.orderIdx = n;
+    } else if (orderIdx !== undefined && !canEditContent) {
+      return res.status(400).json({ error: 'Порядок этапов менять можно только при согласовании плана' });
+    }
+
+    if (supervisorNotes !== undefined) item.supervisorNotes = supervisorNotes === '' ? null : String(supervisorNotes);
+
     if (status !== undefined) {
       const allowed = ['planned', 'in_progress', 'done'];
       if (!allowed.includes(status)) {
@@ -280,32 +327,57 @@ router.patch('/plan-items/:itemId', ...profOnly, async (req, res) => {
       }
       item.status = status;
       if (status === 'done') {
-        item.completedAt = new Date().toISOString().slice(0, 10);
+        item.completedAt = calendarTodayISO();
       } else {
         item.completedAt = null;
       }
     }
+
+    if (item.status === 'overdue') {
+      const d = dateOnlyString(item.dueDate);
+      if (!d || d >= calendarTodayISO()) item.status = 'planned';
+    }
+
     await item.save();
+    await markOverduePlanItems(PlanItem, [item.plan.id]);
+    await item.reload();
+
+    const contentTouched =
+      title !== undefined || description !== undefined || dueDate !== undefined || notes !== undefined || orderIdx !== undefined;
+    if (canEditContent && contentTouched) {
+      await writeAudit(req.user.id, 'supervisor_plan_item_edit', 'PlanItem', item.id, {
+        postgraduateId: item.plan.userId,
+        planId: item.plan.id
+      });
+      await notifyUser(
+        item.plan.userId,
+        'ИПР: правки руководителя',
+        `Научный руководитель уточнил этап плана («${item.title}»). Откройте кабинет аспиранта.`,
+        '/postgraduate.html'
+      );
+    }
+
     res.json(item);
   } catch (error) {
     res.status(500).json({ error: 'Внутренняя ошибка сервера' });
   }
 });
 
-router.patch('/milestones/:id', ...profOnly, async (req, res) => {
+router.get('/plan-items/:itemId/files/:fileId/download', ...profOnly, async (req, res) => {
   try {
-    const m = await Milestone.findByPk(req.params.id);
-    if (!m) return res.status(404).json({ error: 'Не найдено' });
-    if (!await assertSupervises(res, req.user.id, m.userId)) return;
+    const item = await PlanItem.findByPk(req.params.itemId, {
+      include: [{ model: IndividualPlan, as: 'plan' }]
+    });
+    if (!item || !item.plan) return res.status(404).json({ error: 'Не найдено' });
+    if (!await assertSupervises(res, req.user.id, item.plan.userId)) return;
 
-    const { supervisorComment, status } = req.body;
-    if (supervisorComment !== undefined) m.supervisorComment = supervisorComment;
-    if (status !== undefined && ['pending', 'in_progress', 'done', 'skipped'].includes(status)) {
-      m.status = status;
-    }
-    await m.save();
-    await notifyUser(m.userId, 'Веха в плане подготовки', `Обновлена веха: ${m.title}`, '/postgraduate.html');
-    res.json(m);
+    const f = await PlanItemFile.findOne({
+      where: { id: req.params.fileId, planItemId: item.id }
+    });
+    if (!f) return res.status(404).json({ error: 'Файл не найден' });
+    const fp = path.join(planItemUploadRoot, f.storedName);
+    if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Файл отсутствует на диске' });
+    sendFileDownload(res, fp, f.originalName);
   } catch (error) {
     res.status(500).json({ error: 'Внутренняя ошибка сервера' });
   }
@@ -317,25 +389,58 @@ router.patch('/topics/:id', ...profOnly, async (req, res) => {
     if (!t) return res.status(404).json({ error: 'Не найдено' });
     if (!await assertSupervises(res, req.user.id, t.userId)) return;
 
-    const { status, rejectReason } = req.body;
-    if (!status || !['approved', 'rejected', 'submitted'].includes(status)) {
-      return res.status(400).json({ error: 'Укажите status' });
-    }
-    if (status === 'approved' || status === 'rejected') {
-      if (!['submitted', 'draft'].includes(t.status)) {
-        return res.status(400).json({ error: 'Недопустимый переход статуса темы' });
+    const { status, rejectReason, title } = req.body || {};
+    let titleOnlyNotify = false;
+
+    if (title !== undefined) {
+      const trimmed = String(title).trim();
+      if (!trimmed) {
+        return res.status(400).json({ error: 'Название темы не может быть пустым' });
       }
-      t.status = status;
-      t.rejectReason = status === 'rejected' ? (rejectReason || null) : null;
-      await t.save();
+      if (!['draft', 'submitted'].includes(t.status)) {
+        return res.status(400).json({ error: 'Формулировку можно править только до утверждения темы' });
+      }
+      t.title = trimmed;
+      titleOnlyNotify = true;
+    }
+
+    if (status) {
+      if (!['approved', 'rejected', 'submitted'].includes(status)) {
+        return res.status(400).json({ error: 'Укажите корректный status' });
+      }
+      if (status === 'approved' || status === 'rejected') {
+        if (!['submitted', 'draft'].includes(t.status)) {
+          return res.status(400).json({ error: 'Недопустимый переход статуса темы' });
+        }
+        t.status = status;
+        t.rejectReason = status === 'rejected' ? (rejectReason || null) : null;
+        await notifyUser(
+          t.userId,
+          'Тема диссертации',
+          status === 'approved' ? 'Тема диссертации утверждена.' : `Тема отклонена: ${rejectReason || ''}`,
+          '/postgraduate.html'
+        );
+        await writeAudit(req.user.id, `topic_${status}`, 'DissertationTopic', t.id, { postgraduateId: t.userId });
+        titleOnlyNotify = false;
+      }
+    }
+
+    if (title === undefined && !status) {
+      return res.status(400).json({ error: 'Укажите title и/или status' });
+    }
+
+    await t.save();
+
+    if (titleOnlyNotify) {
       await notifyUser(
         t.userId,
         'Тема диссертации',
-        status === 'approved' ? 'Тема диссертации утверждена.' : `Тема отклонена: ${rejectReason || ''}`,
+        'Научный руководитель уточнил формулировку темы.',
         '/postgraduate.html'
       );
-      await writeAudit(req.user.id, `topic_${status}`, 'DissertationTopic', t.id, { postgraduateId: t.userId });
+      await writeAudit(req.user.id, 'topic_title_supervisor', 'DissertationTopic', t.id, { postgraduateId: t.userId });
     }
+
     res.json(t);
   } catch (error) {
     res.status(500).json({ error: 'Внутренняя ошибка сервера' });
@@ -397,7 +502,7 @@ router.get('/documents/:docId/files/:fileId/download', ...profOnly, async (req, 
     const uploadRoot = pathMod.join(__dirname, '../uploads/documents');
     const fp = pathMod.join(uploadRoot, f.storedName);
     if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Файл отсутствует' });
-    res.download(fp, f.originalName);
+    sendFileDownload(res, fp, f.originalName);
   } catch (error) {
     res.status(500).json({ error: 'Внутренняя ошибка сервера' });
   }

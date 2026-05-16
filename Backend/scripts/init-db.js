@@ -289,38 +289,30 @@ async function initDatabase() {
       supervisionKind: 'co_supervisor'
     });
 
-    const plan = await db.IndividualPlan.create({
-      userId: postgraduatePg.id,
-      academicYear: '2025-2026',
-      status: 'approved'
-    });
-
-    await db.PlanItem.bulkCreate([
-      { planId: plan.id, title: 'Публикация по теме диссертации (ВАК / Scopus)', orderIdx: 1, dueDate: '2026-06-01' },
-      { planId: plan.id, title: 'Предзащита на кафедре', orderIdx: 2, dueDate: '2026-12-01', completedAt: null }
-    ]);
-
-    await db.DissertationTopic.create({
+    const demoTopic = await db.DissertationTopic.create({
       userId: postgraduatePg.id,
       title: 'Интеллектуальные методы анализа данных в образовательной среде',
       status: 'approved'
     });
 
-    await db.Milestone.create({
+    const plan = await db.IndividualPlan.create({
       userId: postgraduatePg.id,
-      title: 'Кандидатский экзамен по специальности',
-      milestoneType: 'exam',
-      dueDate: '2026-03-01',
-      status: 'pending'
+      academicYear: '2025-2026',
+      status: 'approved',
+      dissertationTopicId: demoTopic.id
     });
 
-    await db.Milestone.create({
-      userId: postgraduatePg.id,
-      title: 'Сдача отчёта по публикационной активности (демо просрочки)',
-      milestoneType: 'report',
-      dueDate: '2025-01-15',
-      status: 'pending'
-    });
+    await db.PlanItem.bulkCreate([
+      { planId: plan.id, title: 'Публикация по теме диссертации (ВАК / Scopus)', orderIdx: 1, dueDate: '2026-06-01' },
+      { planId: plan.id, title: 'Предзащита на кафедре', orderIdx: 2, dueDate: '2026-12-01', completedAt: null },
+      {
+        planId: plan.id,
+        title: 'Сдача отчёта по публикационной активности (демо просрочки)',
+        orderIdx: 3,
+        dueDate: '2025-01-15',
+        status: 'overdue'
+      }
+    ]);
 
     await db.Publication.create({
       userId: postgraduatePg.id,
@@ -380,70 +372,74 @@ async function initDatabase() {
       return new Date(d.setDate(diff));
     };
     
-    const monday = getMonday(today);
-    monday.setHours(0, 0, 0, 0);
-    
+    const mondayRaw = getMonday(today);
+    const monday = new Date(mondayRaw.getFullYear(), mondayRaw.getMonth(), mondayRaw.getDate());
+
+    const localYmd = (d) => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    };
+
     const schedules = [];
-    
+
     // Дни недели для расписания
     const weekDays = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница'];
     const weekDates = weekDays.map((_, index) => {
-      const date = new Date(monday);
-      date.setDate(monday.getDate() + index);
-      return date.toISOString().split('T')[0];
+      const d = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + index);
+      return localYmd(d);
     });
 
     // 3-4 пары в день; интервалы по требованиям:
     // 1->2 перерыв 10 минут, 2->3 перерыв 20 минут, 3->4 перерыв 10 минут
     const pairTimes = ['09:00 – 10:35', '10:45 – 12:20', '12:40 – 14:15', '14:25 – 16:00'];
     const dayPairCounts = [4, 3, 4, 3, 4]; // Пн-Пт
-    const auditoriumsByGroup = {
-      'Аспирантура 2024-1': ['Лаб. 304', 'Ауд. 210', 'Науч. зал 112', 'Коллоквиум 405'],
-      'Аспирантура 2024-2': ['Лаб. 305', 'Ауд. 211', 'Науч. зал 113', 'Коллоквиум 406'],
-      'Аспирантура 2024-3': ['Лаб. 306', 'Ауд. 212', 'Науч. зал 114', 'Коллоквиум 407']
-    };
-
-    const createGroupSchedule = async (groupPostgraduates, groupName) => {
-      let activityCursor = 0;
-      for (let dayIndex = 0; dayIndex < weekDays.length; dayIndex += 1) {
-        const dayOfWeek = weekDays[dayIndex];
-        const date = weekDates[dayIndex];
-        const pairsForDay = dayPairCounts[dayIndex];
-
-        for (let pairIndex = 0; pairIndex < pairsForDay; pairIndex += 1) {
-          const item = postgraduateActivities[activityCursor % postgraduateActivities.length];
-          activityCursor += 1;
-          const time = pairTimes[pairIndex];
-          const auditorium = (auditoriumsByGroup[groupName] || [])[pairIndex] || 'Ауд. 101';
-
-          for (const pg of groupPostgraduates) {
-            const subjectName = `${item.title} (${item.format})`;
-            // eslint-disable-next-line no-await-in-loop
-            const [subjectRow] = await db.Subject.findOrCreate({
-              where: { name: subjectName },
-              defaults: { name: subjectName }
-            });
-            schedules.push(db.Schedule.create({
-              userId: pg.id,
-              dayOfWeek: dayOfWeek,
-              time: time,
-              subjectId: subjectRow.id,
-              teacher: item.professor.fullName,
-              auditorium: auditorium,
-              date: date
-            }));
-          }
-        }
-      }
-    };
+    // Одна пара — одна аудитория на весь вуз (не «разные комнаты» для одного слота).
+    const pairAuditoriums = ['Лаб. 304', 'Ауд. 210', 'Науч. зал 112', 'Коллоквиум 405'];
 
     const group1 = postgraduates.filter(s => s.groupName === 'Аспирантура 2024-1');
     const group2 = postgraduates.filter(s => s.groupName === 'Аспирантура 2024-2');
     const group3 = postgraduates.filter(s => s.groupName === 'Аспирантура 2024-3');
+    const groupsBySlot = [group1, group2, group3];
 
-    await createGroupSchedule(group1, 'Аспирантура 2024-1');
-    await createGroupSchedule(group2, 'Аспирантура 2024-2');
-    await createGroupSchedule(group3, 'Аспирантура 2024-3');
+    // В один календарный слот (день + номер пары) попадает только одна группа:
+    // один преподаватель, одна аудитория, одно время — без параллельных «копий» на другие группы.
+    let activityCursor = 0;
+    for (let dayIndex = 0; dayIndex < weekDays.length; dayIndex += 1) {
+      const dayOfWeek = weekDays[dayIndex];
+      const date = weekDates[dayIndex];
+      const pairsForDay = dayPairCounts[dayIndex];
+
+      for (let pairIndex = 0; pairIndex < pairsForDay; pairIndex += 1) {
+        const item = postgraduateActivities[activityCursor % postgraduateActivities.length];
+        activityCursor += 1;
+        const time = pairTimes[pairIndex];
+        const auditorium = pairAuditoriums[pairIndex] || 'Ауд. 101';
+
+        const groupIndex = (dayIndex * 5 + pairIndex) % groupsBySlot.length;
+        const groupPostgraduates = groupsBySlot[groupIndex];
+        if (!groupPostgraduates.length) continue;
+
+        for (const pg of groupPostgraduates) {
+          const subjectName = `${item.title} (${item.format})`;
+          // eslint-disable-next-line no-await-in-loop
+          const [subjectRow] = await db.Subject.findOrCreate({
+            where: { name: subjectName },
+            defaults: { name: subjectName }
+          });
+          schedules.push(db.Schedule.create({
+            userId: pg.id,
+            dayOfWeek: dayOfWeek,
+            time: time,
+            subjectId: subjectRow.id,
+            teacher: item.professor.fullName,
+            auditorium: auditorium,
+            date: date
+          }));
+        }
+      }
+    }
 
     const createdSchedules = await Promise.all(schedules);
     console.log('✅ Расписание создано:', createdSchedules.length, 'занятий');

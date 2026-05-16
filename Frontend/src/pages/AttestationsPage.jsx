@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import toast from "react-hot-toast";
 import api, { getErrorMessage } from "../api/client";
 import SectionCard from "../components/SectionCard";
+import { displayUploadFilename } from "../utils/uploadFilename";
 
 function formatDate(value) {
   if (!value) return "";
@@ -343,7 +344,7 @@ export default function AttestationsPage() {
                               target="_blank"
                               rel="noreferrer"
                             >
-                              {row.files[0].originalName}
+                              {displayUploadFilename(row.files[0].originalName)}
                             </a>
                           ) : (
                             <div className="space-y-2">

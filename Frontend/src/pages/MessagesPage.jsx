@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
-import api from "../api/client";
+import api, { getErrorMessage } from "../api/client";
+import { downloadWithAuth } from "../api/downloadWithAuth";
+import { displayUploadFilename } from "../utils/uploadFilename";
 import SectionCard from "../components/SectionCard";
 import { useAuthStore } from "../store/authStore";
 
@@ -15,6 +17,7 @@ export default function MessagesPage() {
   const [convSearch, setConvSearch] = useState("");
   const [msgSearch, setMsgSearch] = useState("");
   const scrollRef = useRef(null);
+  const activeUserIdRef = useRef(null);
 
   const loadConversations = async () => {
     const qs = convSearch.trim() ? `?q=${encodeURIComponent(convSearch.trim())}` : "";
@@ -26,8 +29,30 @@ export default function MessagesPage() {
   };
 
   useEffect(() => {
+    activeUserIdRef.current = activeUserId;
+  }, [activeUserId]);
+
+  useEffect(() => {
     loadConversations();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const tick = async () => {
+      try {
+        const { data } = await api.get("/messages/conversations");
+        setConversations(data);
+        const uid = activeUserIdRef.current;
+        if (uid) {
+          const { data: msgs } = await api.get(`/messages/${uid}`);
+          setMessages(msgs);
+        }
+      } catch {
+        /* тихий опрос */
+      }
+    };
+    const id = setInterval(tick, 22000);
+    return () => clearInterval(id);
   }, []);
 
   useEffect(() => {
@@ -62,6 +87,37 @@ export default function MessagesPage() {
     [conversations]
   );
 
+  const appendFiles = (fileList) => {
+    const picked = Array.from(fileList || []);
+    if (!picked.length) return;
+    setFiles((prev) => {
+      const merged = [...prev];
+      for (const f of picked) {
+        if (merged.length >= 5) break;
+        const dup = merged.some(
+          (x) => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified
+        );
+        if (!dup) merged.push(f);
+      }
+      return merged;
+    });
+  };
+
+  const removePendingFile = (index) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const downloadAttachment = async (fileId, originalName) => {
+    try {
+      await downloadWithAuth(
+        `/messages/files/${fileId}/download`,
+        originalName || "attachment"
+      );
+    } catch (e) {
+      toast.error(getErrorMessage(e));
+    }
+  };
+
   return (
     <SectionCard title={`Сообщения${totalUnread ? ` • непрочитано: ${totalUnread}` : ""}`}>
       <div className="grid md:grid-cols-3 gap-6 h-[600px] max-h-[75vh]">
@@ -70,7 +126,7 @@ export default function MessagesPage() {
           <div className="px-2 mb-2">
             <input
               className="w-full rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-3 py-2 text-sm placeholder:text-slate-500 focus:outline-none focus:border-sky-400 focus:ring-1 focus:ring-sky-400/50 shadow-inner"
-              placeholder="Поиск пользователей..."
+              placeholder="ФИО / логин — поиск нового контакта"
               value={convSearch}
               onChange={(e) => setConvSearch(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && loadConversations()}
@@ -82,7 +138,11 @@ export default function MessagesPage() {
               Найти / обновить
             </button>
           </div>
-          {conversations.length === 0 && <div className="text-sm text-slate-500 px-2">Нет активных диалогов</div>}
+          {conversations.length === 0 && (
+            <div className="text-sm text-slate-500 px-2">
+              Нет диалогов. Оставьте поле пустым — список тех, с кем уже была переписка. Или введите ФИО и нажмите «Найти».
+            </div>
+          )}
           {conversations.map((c) => (
             <button
               key={c.userId}
@@ -144,20 +204,23 @@ export default function MessagesPage() {
                       </div>
                       <div className="text-[14px] leading-relaxed break-words">{m.text}</div>
                       {Array.isArray(m.files) && m.files.length ? (
-                        <div className="mt-2 space-y-1">
+                        <div className="mt-2 flex flex-col gap-1.5">
                           {m.files.map((f) => (
-                            <a
+                            <button
                               key={f.id}
-                              href={`/api/messages/files/${f.id}/download`}
-                              className={`inline-flex items-center gap-2 text-xs underline ${
-                                isMe ? "text-sky-200" : "text-slate-200"
+                              type="button"
+                              className={`flex w-full max-w-full items-start gap-2 rounded-lg border px-2.5 py-1.5 text-xs text-left transition-colors ${
+                                isMe
+                                  ? "border-sky-400/25 bg-sky-950/30 text-sky-100 hover:bg-sky-900/40"
+                                  : "border-slate-600/50 bg-slate-950/40 text-slate-200 hover:bg-slate-900/60"
                               }`}
-                              target="_blank"
-                              rel="noreferrer"
+                              onClick={() => downloadAttachment(f.id, f.originalName)}
                             >
-                              <span>Файл:</span>
-                              <span className="font-semibold">{f.originalName}</span>
-                            </a>
+                              <span className="shrink-0 text-slate-400">Файл</span>
+                              <span className="font-medium break-all underline-offset-2 hover:underline">
+                                {displayUploadFilename(f.originalName)}
+                              </span>
+                            </button>
                           ))}
                         </div>
                       ) : null}
@@ -180,13 +243,19 @@ export default function MessagesPage() {
                     onChange={(e) => setText(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && send()}
                   />
-                  <input
-                    type="file"
-                    multiple
-                    accept=".pdf,.doc,.docx,.xls,.xlsx,image/png,image/jpeg"
-                    className="w-full sm:w-auto text-sm text-slate-300"
-                    onChange={(e) => setFiles(Array.from(e.target.files || []))}
-                  />
+                  <label className="shrink-0 rounded-xl px-4 py-2 text-sm font-medium border border-slate-600 bg-slate-800/80 hover:bg-slate-700 text-slate-200 cursor-pointer transition-colors">
+                    <input
+                      type="file"
+                      multiple
+                      accept=".pdf,.doc,.docx,.xls,.xlsx,image/png,image/jpeg"
+                      className="hidden"
+                      onChange={(e) => {
+                        appendFiles(e.target.files);
+                        e.target.value = "";
+                      }}
+                    />
+                    Прикрепить
+                  </label>
                   <button 
                     className="shrink-0 rounded-xl px-5 py-2 text-sm font-semibold border border-transparent bg-sky-400 font-medium text-slate-950 shadow-[0_4px_14px_rgba(56,189,248,0.25)] hover:shadow-[0_6px_20px_rgba(56,189,248,0.35)] hover:brightness-105 transition-all" 
                     onClick={send}
@@ -195,8 +264,27 @@ export default function MessagesPage() {
                   </button>
                 </div>
                 {files.length ? (
-                  <div className="mt-2 text-xs text-slate-400">
-                    Прикреплено файлов: {files.length} (до 5, максимум 20 МБ каждый)
+                  <div className="mt-3 rounded-xl border border-slate-700/60 bg-slate-950/50 p-3">
+                    <div className="text-xs text-slate-400 mb-2">
+                      К отправке: {files.length} из 5 (можно добавлять по одному)
+                    </div>
+                    <ul className="flex flex-col gap-1.5">
+                      {files.map((f, idx) => (
+                        <li
+                          key={`${f.name}-${f.size}-${f.lastModified}-${idx}`}
+                          className="flex items-center justify-between gap-2 text-sm text-slate-200"
+                        >
+                          <span className="truncate break-all">{displayUploadFilename(f.name)}</span>
+                          <button
+                            type="button"
+                            className="shrink-0 text-rose-300 hover:text-rose-200 text-xs"
+                            onClick={() => removePendingFile(idx)}
+                          >
+                            Убрать
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                 ) : null}
               </div>

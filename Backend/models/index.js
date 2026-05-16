@@ -29,7 +29,6 @@ const Supervision = require('./Supervision')(sequelize);
 const DissertationTopic = require('./DissertationTopic')(sequelize);
 const IndividualPlan = require('./IndividualPlan')(sequelize);
 const PlanItem = require('./PlanItem')(sequelize);
-const Milestone = require('./Milestone')(sequelize);
 const Publication = require('./Publication')(sequelize);
 const Attestation = require('./Attestation')(sequelize);
 const AcademicDocument = require('./Document')(sequelize);
@@ -76,17 +75,17 @@ Supervision.belongsTo(User, { foreignKey: 'supervisorId', as: 'supervisor' });
 User.hasMany(DissertationTopic, { foreignKey: 'userId', as: 'dissertationTopics' });
 DissertationTopic.belongsTo(User, { foreignKey: 'userId', as: 'author' });
 
+DissertationTopic.hasMany(IndividualPlan, { foreignKey: 'dissertationTopicId', as: 'individualPlans' });
+
 User.hasMany(IndividualPlan, { foreignKey: 'userId', as: 'individualPlans' });
 IndividualPlan.belongsTo(User, { foreignKey: 'userId', as: 'owner' });
+IndividualPlan.belongsTo(DissertationTopic, { foreignKey: 'dissertationTopicId', as: 'dissertationTopic' });
 IndividualPlan.hasMany(PlanItem, { foreignKey: 'planId', as: 'items' });
 PlanItem.belongsTo(IndividualPlan, { foreignKey: 'planId', as: 'plan' });
 PlanItem.hasMany(PlanItemFile, { foreignKey: 'planItemId', as: 'files' });
 PlanItemFile.belongsTo(PlanItem, { foreignKey: 'planItemId', as: 'planItem' });
 PlanItemFile.belongsTo(User, { foreignKey: 'uploadedById', as: 'uploadedBy' });
 User.hasMany(PlanItemFile, { foreignKey: 'uploadedById', as: 'uploadedPlanItemFiles' });
-
-User.hasMany(Milestone, { foreignKey: 'userId', as: 'milestones' });
-Milestone.belongsTo(User, { foreignKey: 'userId', as: 'owner' });
 
 User.hasMany(Publication, { foreignKey: 'userId', as: 'publications' });
 Publication.belongsTo(User, { foreignKey: 'userId', as: 'author' });
@@ -102,6 +101,8 @@ ReportFile.belongsTo(User, { foreignKey: 'generatedById', as: 'generatedBy' });
 
 User.hasMany(AcademicDocument, { foreignKey: 'userId', as: 'academicDocuments' });
 AcademicDocument.belongsTo(User, { foreignKey: 'userId', as: 'owner' });
+IndividualPlan.hasMany(AcademicDocument, { foreignKey: 'individualPlanId', as: 'linkedDocuments' });
+AcademicDocument.belongsTo(IndividualPlan, { foreignKey: 'individualPlanId', as: 'individualPlan' });
 
 AcademicDocument.hasMany(DocumentFile, { foreignKey: 'documentId', as: 'files' });
 DocumentFile.belongsTo(AcademicDocument, { foreignKey: 'documentId', as: 'document' });
@@ -150,7 +151,6 @@ const db = {
   DissertationTopic,
   IndividualPlan,
   PlanItem,
-  Milestone,
   Publication,
   Attestation,
   AcademicDocument,
@@ -172,10 +172,12 @@ db.sync = async (force = false) => {
   try {
     await sequelize.authenticate();
     console.log('✅ Подключение к базе данных установлено.');
-    const alter = !force && process.env.DATABASE_SYNC_ALTER === '1';
+    // Default to non-destructive alter in dev to keep schema in sync.
+    // Set DATABASE_SYNC_ALTER=0 to disable.
+    const alter = !force && process.env.DATABASE_SYNC_ALTER !== '0';
     await sequelize.sync({ force, alter });
     if (alter) {
-      console.log('✅ Синхронизация с alter (DATABASE_SYNC_ALTER=1).');
+      console.log('✅ Синхронизация с alter (DATABASE_SYNC_ALTER!=0).');
     } else {
       console.log('✅ Модели синхронизированы с базой данных.');
     }

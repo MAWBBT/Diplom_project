@@ -19,6 +19,7 @@ function itemsToRows(items) {
 export default function CurriculumPage() {
   const { user } = useAuthStore();
   const isAdmin = user?.role === "admin";
+  const isPostgraduate = user?.role === "postgraduate";
 
   const [programs, setPrograms] = useState([]);
   const [subjects, setSubjects] = useState([]);
@@ -27,7 +28,9 @@ export default function CurriculumPage() {
   const [selectedPlanId, setSelectedPlanId] = useState("");
   const [selectedPlan, setSelectedPlan] = useState(null);
 
-  const [viewerPlan, setViewerPlan] = useState(null); // for non-admin
+  const [viewerPlan, setViewerPlan] = useState(null);
+  const [programsCatalog, setProgramsCatalog] = useState([]);
+  const [viewerProgramId, setViewerProgramId] = useState("");
   const [year, setYear] = useState("");
 
   const [createPlan, setCreatePlan] = useState({ programId: "", academicYear: "2026-2027", title: "Учебный план" });
@@ -36,7 +39,16 @@ export default function CurriculumPage() {
   const loadViewer = async () => {
     try {
       const qs = year.trim() ? `?academicYear=${encodeURIComponent(year.trim())}` : "";
-      setViewerPlan((await api.get(`/curriculum/me${qs}`)).data);
+      if (isPostgraduate) {
+        setViewerPlan((await api.get(`/curriculum/me${qs}`)).data);
+        return;
+      }
+      const pid = parseInt(viewerProgramId, 10);
+      if (!pid) {
+        setViewerPlan(null);
+        return;
+      }
+      setViewerPlan((await api.get(`/curriculum/program/${pid}${qs}`)).data);
     } catch (e) {
       toast.error(getErrorMessage(e));
     }
@@ -75,11 +87,34 @@ export default function CurriculumPage() {
           toast.error(getErrorMessage(e));
         }
       })();
+    } else if (isPostgraduate) {
+      void loadViewer();
     } else {
-      loadViewer();
+      let cancelled = false;
+      (async () => {
+        try {
+          const { data } = await api.get("/curriculum/catalog/programs");
+          if (cancelled) return;
+          const list = data || [];
+          setProgramsCatalog(list);
+          setViewerProgramId((prev) => prev || (list[0]?.id != null ? String(list[0].id) : ""));
+        } catch (e) {
+          if (!cancelled) toast.error(getErrorMessage(e));
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAdmin]);
+  }, [isAdmin, isPostgraduate]);
+
+  useEffect(() => {
+    if (isAdmin || isPostgraduate) return;
+    if (!viewerProgramId) return;
+    void loadViewer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, isPostgraduate, viewerProgramId, year]);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -89,7 +124,6 @@ export default function CurriculumPage() {
   }, [selectedPlanId]);
 
   const viewerRows = useMemo(() => itemsToRows(viewerPlan?.items), [viewerPlan]);
-  const adminRows = useMemo(() => itemsToRows(selectedPlan?.items), [selectedPlan]);
 
   const addPlan = async () => {
     try {
@@ -153,8 +187,29 @@ export default function CurriculumPage() {
             </button>
           }
         >
-          <div className="bg-slate-900/40 border border-slate-700/60 rounded-xl p-4 mb-6 grid md:grid-cols-3 gap-3 items-end">
-            <div className="md:col-span-2">
+          <div
+            className={`bg-slate-900/40 border border-slate-700/60 rounded-xl p-4 mb-6 grid gap-3 items-end ${
+              isPostgraduate ? "md:grid-cols-2" : "md:grid-cols-3"
+            }`}
+          >
+            {!isPostgraduate ? (
+              <div className="md:col-span-2">
+                <div className="text-xs text-slate-400 mb-1">Программа подготовки</div>
+                <select
+                  className="w-full rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-3 py-2.5 text-sm"
+                  value={viewerProgramId}
+                  onChange={(e) => setViewerProgramId(e.target.value)}
+                >
+                  <option value="">— выберите программу —</option>
+                  {programsCatalog.map((p) => (
+                    <option key={p.id} value={String(p.id)}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+            <div>
               <div className="text-xs text-slate-400 mb-1">Учебный год (опционально)</div>
               <input
                 className="w-full rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-3 py-2.5 text-sm"
@@ -180,7 +235,13 @@ export default function CurriculumPage() {
               </div>
             </div>
           ) : (
-            <div className="text-slate-400 mb-4">Учебный план не задан (или не привязана программа в профиле).</div>
+            <div className="text-slate-400 mb-4">
+              {isPostgraduate
+                ? "Учебный план не задан (или не привязана программа в профиле аспиранта)."
+                : !viewerProgramId
+                  ? "Выберите программу подготовки."
+                  : "Для выбранной программы и года план не найден."}
+            </div>
           )}
 
           <SimpleTable rows={viewerRows} />
@@ -352,9 +413,6 @@ export default function CurriculumPage() {
                     ) : null}
                   </tbody>
                 </table>
-              </div>
-              <div className="mt-4">
-                <SimpleTable rows={adminRows} />
               </div>
             </div>
           </div>

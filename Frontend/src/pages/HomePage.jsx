@@ -9,6 +9,28 @@ export default function HomePage() {
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [summary, setSummary] = useState(null);
+  const [summaryError, setSummaryError] = useState("");
+
+  useEffect(() => {
+    if (!user || user.role === "postgraduate") {
+      setSummary(null);
+      setSummaryError("");
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get("/profile/home-summary");
+        if (!cancelled) setSummary(data);
+      } catch (e) {
+        if (!cancelled) setSummaryError(getErrorMessage(e));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   useEffect(() => {
     if (!user || user.role !== "postgraduate") {
@@ -44,19 +66,21 @@ export default function HomePage() {
 
   const timeline = useMemo(() => {
     if (!dashboard) return [];
-    const milestones = (dashboard.milestones || []).map((m) => ({
-      date: m.dueDate || m.createdAt,
-      title: m.title,
-      type: "Веха",
-      status: m.status,
-    }));
+    const planItems = (dashboard.individualPlans || []).flatMap((p) =>
+      (p.items || []).map((it) => ({
+        date: it.dueDate,
+        title: it.title,
+        type: "Этап ИУП",
+        status: it.status,
+      }))
+    );
     const attest = (dashboard.attestations || []).map((a) => ({
-      date: a.attestedAt || a.createdAt,
+      date: a.attestedAt,
       title: a.decision || a.periodLabel,
       type: "Аттестация",
       status: "done",
     }));
-    return [...milestones, ...attest]
+    return [...planItems, ...attest]
       .filter((x) => x.date)
       .sort((a, b) => new Date(a.date) - new Date(b.date))
       .slice(0, 8);
@@ -70,8 +94,50 @@ export default function HomePage() {
     return Math.round((done / items.length) * 100);
   }, [dashboard]);
 
+  const unreadNotifications = useMemo(
+    () => (notifications || []).filter((n) => !n.readAt).length,
+    [notifications]
+  );
+
+  const importantList = useMemo(
+    () => (notifications || []).filter((n) => !n.readAt).slice(0, 6),
+    [notifications]
+  );
+
   return (
     <div className="space-y-6">
+      {user && user.role !== "postgraduate" && (
+        <SectionCard title="Сводка">
+          {summaryError ? (
+            <div className="rounded-xl border border-rose-500/40 bg-rose-950/40 px-4 py-3 text-rose-100 text-sm mb-4">
+              {summaryError}
+            </div>
+          ) : null}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Metric title="Уведомления (непрочит.)" value={summary?.unreadNotifications ?? "—"} />
+            <Metric title="Сообщения (непрочит.)" value={summary?.unreadMessages ?? "—"} />
+            {user.role === "admin" && summary?.metrics ? (
+              <>
+                <Metric title="Пользователей" value={summary.metrics.usersTotal} />
+                <Metric title="Аспирантов" value={summary.metrics.postgraduates} />
+              </>
+            ) : null}
+            {user.role === "professor" && summary?.metrics ? (
+              <>
+                <Metric title="Подопечных" value={summary.metrics.supervisedPostgraduates} />
+                <Metric title="Планов на согласовании" value={summary.metrics.plansPendingApproval} />
+              </>
+            ) : null}
+            {user.role === "program_admin" && summary?.metrics ? (
+              <>
+                <Metric title="Аспирантов" value={summary.metrics.postgraduates} />
+                <Metric title="Просроченных этапов" value={summary.metrics.overduePlanItems} />
+              </>
+            ) : null}
+          </div>
+        </SectionCard>
+      )}
+
       {user?.role === "postgraduate" && (
         <>
           {loading && <p className="text-slate-400 text-sm">Загрузка дашборда…</p>}
@@ -85,7 +151,7 @@ export default function HomePage() {
               <Metric title="Прогресс ИУП" value={`${planProgress}%`} />
               <Metric title="Публикации" value={(dashboard?.publications || []).length} />
               <Metric title="Документы" value={(dashboard?.documents || []).length} />
-              <Metric title="Уведомления" value={notifications.length} />
+              <Metric title="Уведомления (непрочит.)" value={unreadNotifications} />
             </div>
             <div className="w-full h-2.5 bg-slate-800 rounded-full overflow-hidden shadow-inner">
               <div
@@ -114,20 +180,20 @@ export default function HomePage() {
                   </div>
                 ))
               ) : (
-                <p className="text-slate-400">Нет данных по вехам.</p>
+                <p className="text-slate-400">Нет событий в таймлайне.</p>
               )}
             </div>
           </SectionCard>
 
-          <SectionCard title="Блок «Важное»">
+          <SectionCard title="Блок «Важное» (непрочитанные)">
             <div className="space-y-3">
-              {(notifications || []).slice(0, 6).map((n) => (
+              {importantList.map((n) => (
                 <div key={n.id} className="bg-amber-950/20 border border-amber-900/40 rounded-xl px-4 py-3">
                   <p className="text-amber-100 font-medium text-sm">{n.title || "Уведомление"}</p>
                   <p className="text-amber-200/60 text-xs mt-1">{n.body || n.text || "-"}</p>
                 </div>
               ))}
-              {!notifications.length && <p className="text-slate-400">Важных уведомлений пока нет.</p>}
+              {!importantList.length && <p className="text-slate-400">Непрочитанных уведомлений нет.</p>}
             </div>
           </SectionCard>
         </>
