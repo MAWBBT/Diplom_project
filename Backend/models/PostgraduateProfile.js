@@ -33,6 +33,20 @@ module.exports = (sequelize) => {
       type: DataTypes.INTEGER,
       allowNull: true,
       references: { model: 'programs', key: 'id' }
+    },
+    supervisorId: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: { model: 'users', key: 'id' }
+    },
+    coSupervisorId: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      references: { model: 'users', key: 'id' }
+    },
+    supervisionStartedAt: {
+      type: DataTypes.DATEONLY,
+      allowNull: true
     }
   }, {
     tableName: 'postgraduate_profiles',

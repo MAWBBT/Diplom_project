@@ -3,8 +3,11 @@ import toast from "react-hot-toast";
 import api, { getErrorMessage } from "../api/client";
 import { downloadWithAuth } from "../api/downloadWithAuth";
 import { displayUploadFilename } from "../utils/uploadFilename";
+import CabinetTabBar from "../components/cabinet/CabinetTabBar";
+import PostgraduateFullOverview from "../components/cabinet/PostgraduateFullOverview";
 import SectionCard from "../components/SectionCard";
 import SimpleTable from "../components/SimpleTable";
+import { useAuthStore } from "../store/authStore";
 
 function planItemDueInputValue(raw) {
   if (raw == null || raw === "") return "";
@@ -49,8 +52,9 @@ function IupSectionCard({ step, title, description, children }) {
 }
 
 export default function PostgraduatePage() {
+  const { user } = useAuthStore();
   const [data, setData] = useState(null);
-  const [tab, setTab] = useState("iup");
+  const [tab, setTab] = useState("overview");
   const [topic, setTopic] = useState("");
   const [search, setSearch] = useState("");
   const [planTitle, setPlanTitle] = useState("");
@@ -64,13 +68,23 @@ export default function PostgraduatePage() {
   const [docTitle, setDocTitle] = useState("");
   const [docType, setDocType] = useState("report");
   const [docPlanId, setDocPlanId] = useState("");
+  const [pubForm, setPubForm] = useState({ title: "", venue: "", year: "", doi: "", indexing: "" });
+  const [grades, setGrades] = useState([]);
+  const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
 
   const load = async () => {
     setLoadError("");
     try {
-      setData((await api.get("/postgraduate/dashboard")).data);
+      const [dash, gr, notif] = await Promise.all([
+        api.get("/postgraduate/dashboard"),
+        api.get("/grades"),
+        api.get("/notifications"),
+      ]);
+      setData(dash.data);
+      setGrades(Array.isArray(gr.data) ? gr.data : []);
+      setNotifications(Array.isArray(notif.data) ? notif.data : []);
     } catch (e) {
       setLoadError(getErrorMessage(e));
       toast.error("Ошибка при загрузке кабинета");
@@ -323,14 +337,49 @@ export default function PostgraduatePage() {
   }, [data]);
 
   const tabs = [
-    ["iup", "ИУП"],
-    ["docs", "Документооборот"],
+    ["overview", "Обзор"],
+    ["iup", "План работы"],
+    ["docs", "Документы"],
     ["pubs", "Публикации"],
     ["exams", "Аттестации"],
-    ["finance", "Финансы/Льготы"],
-    ["events", "Мероприятия"],
-    ["tools", "Инструменты"],
   ];
+
+  const supervisor = data?.supervisions?.[0]?.supervisor;
+  const dissertationTitle =
+    selectedPlan?.dissertationTopic?.title ||
+    data?.dissertationTopics?.find((t) => t.status === "approved")?.title ||
+    data?.dissertationTopics?.[0]?.title ||
+    "—";
+
+  const planProgress = useMemo(() => {
+    const items = (data?.individualPlans || []).flatMap((p) => p.items || []);
+    if (!items.length) return 0;
+    const done = items.filter((i) => i.status === "done" || i.completedAt).length;
+    return Math.round((done / items.length) * 100);
+  }, [data?.individualPlans]);
+
+  const planItemsSummary = useMemo(() => {
+    const items = (data?.individualPlans || []).flatMap((p) => p.items || []);
+    const overdue = items.filter((i) => i.status === "overdue").length;
+    return { total: items.length, overdue };
+  }, [data?.individualPlans]);
+
+  const addPublication = async () => {
+    if (!pubForm.title.trim()) return toast.error("Укажите название публикации");
+    handleReq(
+      () =>
+        api.post("/postgraduate/publications", {
+          title: pubForm.title.trim(),
+          venue: pubForm.venue.trim() || null,
+          year: pubForm.year ? parseInt(pubForm.year, 10) : null,
+          doi: pubForm.doi.trim() || null,
+          indexing: pubForm.indexing.trim() || null,
+          status: "submitted",
+        }),
+      "Публикация добавлена"
+    );
+    setPubForm({ title: "", venue: "", year: "", doi: "", indexing: "" });
+  };
 
   return (
     <div className="space-y-6">
@@ -341,23 +390,24 @@ export default function PostgraduatePage() {
         </div>
       )}
       
-      <SectionCard title="Кабинет аспиранта">
-        <div className="flex flex-wrap gap-2">
-          {tabs.map(([id, title]) => (
-            <button
-              key={id}
-              className={`inline-flex items-center rounded-xl px-4 py-2 text-sm font-medium border transition-all duration-200 ${
-                tab === id 
-                  ? "text-slate-900 border-sky-300 bg-sky-400 font-medium shadow-[0_10px_26px_rgba(56,189,248,0.34)]"
-                  : "text-slate-200 border-slate-600/65 bg-slate-800/60 hover:bg-slate-700/85 hover:-translate-y-px"
-              }`}
-              onClick={() => setTab(id)}
-            >
-              {title}
-            </button>
-          ))}
-        </div>
-      </SectionCard>
+      <CabinetTabBar tabs={tabs} activeTab={tab} onTabChange={setTab} />
+
+      {tab === "overview" && (
+        <PostgraduateFullOverview
+          user={user}
+          data={data}
+          grades={grades}
+          notifications={notifications}
+          dissertationTitle={dissertationTitle}
+          supervisor={supervisor}
+          selectedPlan={selectedPlan}
+          planProgress={planProgress}
+          planItemsSummary={planItemsSummary}
+          examRows={examRows}
+          publications={data?.publications}
+          onOpenTab={setTab}
+        />
+      )}
 
       {tab === "iup" && (
         <SectionCard title="Индивидуальный учебный план">
@@ -791,7 +841,26 @@ export default function PostgraduatePage() {
       )}
 
       {tab === "pubs" && (
-        <SectionCard title="Библиотека и публикации">
+        <SectionCard title="Публикации и апробации">
+          <p className="text-xs text-slate-500 mb-4 max-w-2xl">
+            Укажите индексирование (РИНЦ, Scopus, ВАК) и DOI или ссылку на публикацию.
+          </p>
+          <div className="rounded-2xl border border-slate-700/55 bg-slate-950/35 p-5 mb-6 space-y-3">
+            <div className="grid md:grid-cols-2 gap-3">
+              <input className={fld} placeholder="Название *" value={pubForm.title} onChange={(e) => setPubForm((s) => ({ ...s, title: e.target.value }))} />
+              <input className={fld} placeholder="Издание / конференция" value={pubForm.venue} onChange={(e) => setPubForm((s) => ({ ...s, venue: e.target.value }))} />
+              <input className={fld} placeholder="Год" value={pubForm.year} onChange={(e) => setPubForm((s) => ({ ...s, year: e.target.value }))} />
+              <input className={fld} placeholder="Индексирование (РИНЦ, Scopus…)" value={pubForm.indexing} onChange={(e) => setPubForm((s) => ({ ...s, indexing: e.target.value }))} />
+              <input className={`${fld} md:col-span-2`} placeholder="DOI или ссылка" value={pubForm.doi} onChange={(e) => setPubForm((s) => ({ ...s, doi: e.target.value }))} />
+            </div>
+            <button
+              type="button"
+              className="rounded-xl px-5 py-2.5 text-sm font-semibold bg-sky-400 text-slate-950 hover:brightness-105"
+              onClick={addPublication}
+            >
+              Добавить публикацию
+            </button>
+          </div>
           <div className="grid lg:grid-cols-3 gap-3 mb-5">
             <div className="lg:col-span-2">
               <input
@@ -810,55 +879,14 @@ export default function PostgraduatePage() {
       )}
 
       {tab === "exams" && (
-        <SectionCard title="Аттестации">
-          <div className="text-slate-400 text-xs mb-3">
-            Этот раздел отображает результаты аттестаций (экзамены должны вестись отдельным модулем, если потребуется).
-          </div>
+        <SectionCard title="Аттестации и отчёты">
+          <p className="text-slate-400 text-xs mb-3">
+            График кандидатских экзаменов и этапов диссертации; отчёты прикрепляются к записям аттестации.
+          </p>
           <SimpleTable rows={examRows} />
         </SectionCard>
       )}
 
-      {tab === "finance" && (
-        <SectionCard title="Финансы и льготы">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div className="rounded-[0.9rem] p-4 border border-slate-600/70 bg-gradient-to-br from-slate-900/80 to-slate-800/70">
-              <p className="text-slate-400 text-[11px] uppercase tracking-wider font-semibold">Стипендия</p>
-              <p className="text-lg font-bold text-sky-100 mt-1">Доступна</p>
-            </div>
-            <div className="rounded-[0.9rem] p-4 border border-slate-600/70 bg-gradient-to-br from-slate-900/80 to-slate-800/70">
-              <p className="text-slate-400 text-[11px] uppercase tracking-wider font-semibold">Матпомощь</p>
-              <p className="text-lg font-bold text-sky-100 mt-1">Онлайн-заявка</p>
-            </div>
-            <div className="rounded-[0.9rem] p-4 border border-slate-600/70 bg-gradient-to-br from-slate-900/80 to-slate-800/70">
-              <p className="text-slate-400 text-[11px] uppercase tracking-wider font-semibold">Общежитие</p>
-              <p className="text-lg font-bold text-sky-100 mt-1">Статус в личном деле</p>
-            </div>
-          </div>
-        </SectionCard>
-      )}
-
-      {tab === "events" && (
-        <SectionCard title="Конференции и мероприятия">
-          <SimpleTable
-            rows={[
-              { id: 1, title: "PhD Research Days", type: "Конференция", relevance: "Высокая", action: "Подать заявку на командировку" },
-              { id: 2, title: "Научный семинар кафедры", type: "Семинар", relevance: "Средняя", action: "Добавить в календарь" },
-            ]}
-          />
-        </SectionCard>
-      )}
-
-      {tab === "tools" && (
-        <SectionCard title="Инструменты">
-          <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-4">
-            <button className="rounded-xl px-5 py-3 font-semibold border border-transparent bg-sky-400 font-medium text-slate-950 shadow-[0_8px_24px_rgba(56,189,248,0.25)] hover:shadow-[0_10px_28px_rgba(56,189,248,0.35)] hover:brightness-105 transition-all text-sm" onClick={exportPersonalArchive}>Скачать личное дело</button>
-            <button className="rounded-xl px-5 py-3 font-medium text-sm border border-slate-600 bg-slate-800/80 hover:bg-slate-700 hover:border-slate-500 text-slate-200 transition-colors" onClick={load}>Обновить данные</button>
-            <div className="bg-slate-800/60 border border-slate-700 rounded-xl px-4 py-2 text-xs text-slate-300 flex items-center col-span-full md:col-span-1">
-              Дедлайны отображаются на дашборде.
-            </div>
-          </div>
-        </SectionCard>
-      )}
     </div>
   );
 }

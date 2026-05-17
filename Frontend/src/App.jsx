@@ -3,6 +3,16 @@ import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "reac
 import api, { getErrorMessage } from "./api/client";
 import { useAuthStore } from "./store/authStore";
 import SectionCard from "./components/SectionCard";
+import { ROLES, roleMatches, getRoleTitle, isStudent, isSupervisor } from "./utils/roles";
+
+function getCabinetPath(user) {
+  if (!user) return null;
+  if (isStudent(user)) return "/postgraduate";
+  if (isSupervisor(user)) return "/supervisor";
+  return null;
+}
+
+const CABINET_PATHS = new Set(["/postgraduate", "/supervisor", "/cabinet"]);
 
 const HomePage = lazy(() => import("./pages/HomePage"));
 const LoginPage = lazy(() => import("./pages/LoginPage"));
@@ -91,25 +101,30 @@ export default function App() {
 
     const items = [
       { to: "/profile", label: "Профиль" },
-      { to: "/study", label: "Учёба" },
-      { to: "/grades", label: "Успеваемость" },
       { to: "/communications", label: "Коммуникации" },
     ];
-    if (["professor", "admin"].includes(user.role)) items.push({ to: "/attestations", label: "Аттестации" });
-    if (["professor", "admin"].includes(user.role)) items.push({ to: "/attendance", label: "Посещаемость" });
-    if (user.role === "postgraduate") items.push({ to: "/attendance", label: "Посещаемость" });
-    if (user.role === "admin") items.push({ to: "/admin", label: "Админка" });
-    if (user.role === "admin") items.push({ to: "/reports", label: "Отчётность" });
-    if (user.role === "program_admin") items.push({ to: "/program-admin", label: "Админ программы" });
+
+    if (isStudent(user)) {
+      items.push({ to: "/study", label: "Учёба" });
+      items.push({ to: "/grades", label: "Успеваемость" });
+      items.push({ to: "/attendance", label: "Посещаемость" });
+    } else if (isSupervisor(user)) {
+      items.push({ to: "/study", label: "Расписание" });
+      items.push({ to: "/grades", label: "Журнал оценок" });
+    } else if (roleMatches(user.role, [ROLES.ADMIN])) {
+      items.push({ to: "/study", label: "Учёба" });
+      items.push({ to: "/grades", label: "Успеваемость" });
+      items.push({ to: "/admin", label: "Админка" });
+      items.push({ to: "/program-admin", label: "Учебный план" });
+      items.push({ to: "/reports", label: "Отчётность" });
+    }
+
+    const cabinet = getCabinetPath(user);
+    if (cabinet) {
+      items.push({ to: "/cabinet", label: "Личный кабинет", cabinetRoute: true });
+    }
 
     return [...base, ...items];
-  }, [user]);
-
-  const cabinetAction = useMemo(() => {
-    if (!user) return null;
-    if (user.role === "professor") return { to: "/supervisor", label: "Кабинет Руководителя" };
-    if (user.role === "postgraduate") return { to: "/postgraduate", label: "Кабинет Аспиранта" };
-    return null;
   }, [user]);
 
   if (loadingAuth) {
@@ -154,7 +169,7 @@ export default function App() {
                   </div>
                   <div className="mt-1 flex flex-wrap items-center gap-2">
                     <span className="inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold border border-slate-600/70 bg-slate-800/60 text-slate-200">
-                      роль: {user.role}
+                      {getRoleTitle(user.role)}
                     </span>
                     {user.groupName ? (
                       <span className="inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold border border-slate-600/70 bg-slate-800/60 text-slate-200">
@@ -179,13 +194,16 @@ export default function App() {
                   <NavLink
                     to={item.to}
                     end={item.to === "/"}
-                    className={({ isActive }) =>
-                      `inline-flex items-center no-underline rounded-xl px-4 py-2 text-sm border transition duration-150 ${
-                        isActive
+                    className={({ isActive }) => {
+                      const active =
+                        isActive ||
+                        (item.cabinetRoute && CABINET_PATHS.has(location.pathname));
+                      return `inline-flex items-center no-underline rounded-xl px-4 py-2 text-sm border transition duration-150 ${
+                        active
                           ? "text-slate-950 font-medium border-sky-400 bg-sky-400 shadow-[0_0_20px_rgba(56,189,248,0.3)]"
                           : "text-slate-200 border-slate-600/65 bg-slate-800/60 hover:bg-slate-700/85 hover:-translate-y-px"
-                      }`
-                    }
+                      }`;
+                    }}
                   >
                     {item.label}
                   </NavLink>
@@ -196,21 +214,6 @@ export default function App() {
 
           {user ? (
             <div className="flex flex-wrap items-center gap-2 shrink-0">
-              {cabinetAction ? (
-                <NavLink
-                  to={cabinetAction.to}
-                  end
-                  className={({ isActive }) =>
-                    `px-4 py-2 rounded-xl text-sm border transition duration-150 ${
-                      isActive
-                        ? "text-slate-950 font-medium border-sky-400 bg-sky-400 shadow-[0_0_20px_rgba(56,189,248,0.3)]"
-                        : "border-slate-600/65 text-slate-200 bg-slate-800/60 hover:bg-slate-700/85 hover:-translate-y-px"
-                    }`
-                  }
-                >
-                  {cabinetAction.label}
-                </NavLink>
-              ) : null}
               <button
                 type="button"
                 onClick={() => {
@@ -248,6 +251,7 @@ function MainContent({ user, currentPath }) {
     "/admin",
     "/postgraduate",
     "/supervisor",
+    "/cabinet",
     "/program-admin",
     "/attestations",
     "/attendance",
@@ -283,6 +287,14 @@ function MainContent({ user, currentPath }) {
     <PageTransition>
       <Suspense fallback={<SectionCard title="Загрузка">Загрузка…</SectionCard>}>
         <Routes>
+          <Route
+            path="/cabinet"
+            element={
+              <Guard user={user}>
+                <CabinetRedirect user={user} />
+              </Guard>
+            }
+          />
           <Route path="/" element={<HomePage />} />
           <Route path="/index.html" element={<HomePage />} />
           <Route path="/login" element={<LoginPage />} />
@@ -308,7 +320,7 @@ function MainContent({ user, currentPath }) {
             path="/postgraduate"
             element={
               <Guard user={user}>
-                <RoleGuard user={user} roles={["postgraduate"]}>
+                <RoleGuard user={user} roles={[ROLES.STUDENT]}>
                   <PostgraduatePage />
                 </RoleGuard>
               </Guard>
@@ -318,7 +330,7 @@ function MainContent({ user, currentPath }) {
             path="/supervisor"
             element={
               <Guard user={user}>
-                <RoleGuard user={user} roles={["professor"]}>
+                <RoleGuard user={user} roles={[ROLES.SUPERVISOR]}>
                   <SupervisorPage />
                 </RoleGuard>
               </Guard>
@@ -328,7 +340,7 @@ function MainContent({ user, currentPath }) {
             path="/program-admin"
             element={
               <Guard user={user}>
-                <RoleGuard user={user} roles={["program_admin"]}>
+                <RoleGuard user={user} roles={[ROLES.ADMIN]}>
                   <ProgramAdminPage />
                 </RoleGuard>
               </Guard>
@@ -338,7 +350,7 @@ function MainContent({ user, currentPath }) {
             path="/attestations"
             element={
               <Guard user={user}>
-                <RoleGuard user={user} roles={["professor", "admin"]}>
+                <RoleGuard user={user} roles={[ROLES.SUPERVISOR, ROLES.ADMIN]}>
                   <AttestationsPage />
                 </RoleGuard>
               </Guard>
@@ -348,12 +360,12 @@ function MainContent({ user, currentPath }) {
             path="/attendance"
             element={
               <Guard user={user}>
-                {user?.role === "postgraduate" ? (
-                  <RoleGuard user={user} roles={["postgraduate"]}>
+                {roleMatches(user?.role, [ROLES.STUDENT]) ? (
+                  <RoleGuard user={user} roles={[ROLES.STUDENT]}>
                     <AttendanceMyPage />
                   </RoleGuard>
                 ) : (
-                  <RoleGuard user={user} roles={["professor", "admin"]}>
+                  <RoleGuard user={user} roles={[ROLES.SUPERVISOR, ROLES.ADMIN]}>
                     <AttendancePage />
                   </RoleGuard>
                 )}
@@ -391,8 +403,20 @@ function Guard({ user, children }) {
   return children;
 }
 
+function CabinetRedirect({ user }) {
+  const target = getCabinetPath(user);
+  if (!target) {
+    return (
+      <SectionCard title="Личный кабинет">
+        <p className="text-slate-300">Для вашей роли отдельный личный кабинет не предусмотрен.</p>
+      </SectionCard>
+    );
+  }
+  return <Navigate to={target} replace />;
+}
+
 function RoleGuard({ user, roles, children }) {
-  if (!roles.includes(user.role)) {
+  if (!roleMatches(user.role, roles)) {
     return (
       <SectionCard title="Доступ запрещён">
         <p className="text-slate-300 mb-4">Этот раздел недоступен для вашей роли.</p>

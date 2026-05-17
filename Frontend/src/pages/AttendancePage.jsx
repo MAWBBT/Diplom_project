@@ -3,6 +3,7 @@ import toast from "react-hot-toast";
 import api, { getErrorMessage } from "../api/client";
 import SectionCard from "../components/SectionCard";
 import { useAuthStore } from "../store/authStore";
+import { isAdmin, isSupervisor } from "../utils/roles";
 
 function toDateOnly(value) {
   if (!value) return "";
@@ -36,8 +37,8 @@ const fld =
 
 export default function AttendancePage() {
   const { user } = useAuthStore();
-  const canManage = ["admin", "professor"].includes(user?.role);
-  const isProfessor = user?.role === "professor";
+  const canManage = isSupervisor(user) || isAdmin(user);
+  const isProfessor = isSupervisor(user);
 
   const [subjects, setSubjects] = useState([]);
   const [lessons, setLessons] = useState([]);
@@ -204,7 +205,7 @@ export default function AttendancePage() {
   if (!canManage) {
     return (
       <SectionCard title="Посещаемость">
-        <div className="text-slate-300">Этот раздел доступен только для admin / professor.</div>
+        <div className="text-slate-300">Этот раздел доступен только научному руководителю или администратору.</div>
       </SectionCard>
     );
   }

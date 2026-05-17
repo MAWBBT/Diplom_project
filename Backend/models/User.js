@@ -23,9 +23,9 @@ module.exports = (sequelize) => {
     role: {
       type: DataTypes.STRING(50),
       allowNull: false,
-      defaultValue: 'postgraduate',
+      defaultValue: 'student',
       validate: {
-        isIn: [['admin', 'postgraduate', 'professor', 'program_admin']]
+        isIn: [['admin', 'student', 'supervisor', 'postgraduate', 'professor']]
       }
     },
     groupName: {

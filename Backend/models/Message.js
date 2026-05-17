@@ -33,6 +33,21 @@ module.exports = (sequelize) => {
     isRead: {
       type: DataTypes.BOOLEAN,
       defaultValue: false
+    },
+    messageType: {
+      type: DataTypes.STRING(30),
+      allowNull: false,
+      defaultValue: 'personal',
+      validate: {
+        isIn: [['personal', 'supervisor_feedback']]
+      }
+    },
+    feedbackKind: {
+      type: DataTypes.STRING(40),
+      allowNull: true,
+      validate: {
+        isIn: [['review', 'conclusion', 'recommendation']]
+      }
     }
   }, {
     tableName: 'messages',

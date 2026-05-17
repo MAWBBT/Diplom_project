@@ -52,7 +52,7 @@ export default function LoginPage() {
           <button type="submit" className="w-full sm:w-auto rounded-xl px-6 py-3 font-semibold border border-transparent bg-sky-400 font-medium text-slate-950 shadow-[0_8px_24px_rgba(14,165,233,0.35)] hover:shadow-[0_10px_28px_rgba(14,165,233,0.45)] hover:brightness-105 transition-all">
             Войти
           </button>
-          <span className="text-[13px] text-slate-500">Например: postgraduate1 / password123</span>
+          <span className="text-[13px] text-slate-500">Например: student1 / password123</span>
         </div>
       </form>
     </SectionCard>

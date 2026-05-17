@@ -9,13 +9,18 @@ const {
   professorTeachesSubject
 } = require('../utils/professorSubjects');
 const { dedupeScheduleSlots } = require('../utils/scheduleSlots');
+const { studentRoleWhere } = require('../utils/roles');
 
-const requireProfessorOrAdmin = (req, res, next) => {
-  if (!['professor', 'admin'].includes(req.user.role)) {
-    return res.status(403).json({ error: 'Требуются права профессора или администратора' });
+const { hasRole, ROLES } = require('../utils/roles');
+
+const requireSupervisorOrAdmin = (req, res, next) => {
+  if (!hasRole(req.user, ROLES.SUPERVISOR, ROLES.ADMIN)) {
+    return res.status(403).json({ error: 'Требуются права научного руководителя или администратора' });
   }
   next();
 };
+
+const isTeachingSupervisor = (user) => hasRole(user, ROLES.SUPERVISOR);
 
 function scheduleMatchesPostgraduateGroup(scheduleRow, postgraduate) {
   if (!scheduleRow || !postgraduate) return false;
@@ -27,11 +32,11 @@ function scheduleMatchesPostgraduateGroup(scheduleRow, postgraduate) {
 }
 
 // GET /api/journal/workspace — аспиранты, занятия, дисциплины и оценки одним запросом
-router.get('/workspace', requireAuth, requireProfessorOrAdmin, async (req, res) => {
+router.get('/workspace', requireAuth, requireSupervisorOrAdmin, async (req, res) => {
   try {
     const [postgraduates, schedulesRaw, subjects] = await Promise.all([
       User.findAll({
-        where: { role: 'postgraduate' },
+        where: studentRoleWhere(),
         attributes: { exclude: ['password'] },
         order: [['groupName', 'ASC'], ['fullName', 'ASC']]
       }),
@@ -43,7 +48,7 @@ router.get('/workspace', requireAuth, requireProfessorOrAdmin, async (req, res) 
         order: [['date', 'ASC'], ['time', 'ASC']]
       }),
       (async () => {
-        if (req.user.role === 'professor') {
+        if (isTeachingSupervisor(req.user)) {
           const ids = await getProfessorSubjectIds(req.user);
           if (!ids.length) return [];
           return Subject.findAll({ where: { id: { [Op.in]: ids } }, order: [['name', 'ASC']] });
@@ -53,13 +58,13 @@ router.get('/workspace', requireAuth, requireProfessorOrAdmin, async (req, res) 
     ]);
 
     let schedule =
-      req.user.role === 'professor'
+      isTeachingSupervisor(req.user)
         ? schedulesRaw.filter((s) => scheduleBelongsToProfessor(s, req.user))
         : schedulesRaw;
     schedule = dedupeScheduleSlots(schedule);
 
     const gradeWhere = {};
-    if (req.user.role === 'professor') {
+    if (isTeachingSupervisor(req.user)) {
       const ids = await getProfessorSubjectIds(req.user);
       if (!ids.length) {
         return res.json({ postgraduates, schedule, subjects, grades: [] });
@@ -83,10 +88,10 @@ router.get('/workspace', requireAuth, requireProfessorOrAdmin, async (req, res) 
   }
 });
 
-router.get('/postgraduates', requireAuth, requireProfessorOrAdmin, async (req, res) => {
+router.get('/postgraduates', requireAuth, requireSupervisorOrAdmin, async (req, res) => {
   try {
     const list = await User.findAll({
-      where: { role: 'postgraduate' },
+      where: studentRoleWhere(),
       attributes: { exclude: ['password'] },
       order: [['groupName', 'ASC'], ['fullName', 'ASC']]
     });
@@ -98,10 +103,10 @@ router.get('/postgraduates', requireAuth, requireProfessorOrAdmin, async (req, r
 });
 
 // GET /api/journal/subjects - Получить все предметы
-router.get('/subjects', requireAuth, requireProfessorOrAdmin, async (req, res) => {
+router.get('/subjects', requireAuth, requireSupervisorOrAdmin, async (req, res) => {
   try {
     let subjects;
-    if (req.user.role === 'professor') {
+    if (isTeachingSupervisor(req.user)) {
       const ids = await getProfessorSubjectIds(req.user);
       if (!ids.length) {
         return res.json([]);
@@ -123,7 +128,7 @@ router.get('/subjects', requireAuth, requireProfessorOrAdmin, async (req, res) =
 });
 
 // GET /api/journal/schedule — занятия для журнала (опционально ?postgraduateId= или ?groupName=)
-router.get('/schedule', requireAuth, requireProfessorOrAdmin, async (req, res) => {
+router.get('/schedule', requireAuth, requireSupervisorOrAdmin, async (req, res) => {
   try {
     const schedules = await Schedule.findAll({
       include: [{
@@ -139,7 +144,7 @@ router.get('/schedule', requireAuth, requireProfessorOrAdmin, async (req, res) =
     });
 
     let list =
-      req.user.role === 'professor'
+      isTeachingSupervisor(req.user)
         ? schedules.filter((s) => scheduleBelongsToProfessor(s, req.user))
         : schedules;
 
@@ -148,7 +153,7 @@ router.get('/schedule', requireAuth, requireProfessorOrAdmin, async (req, res) =
       const postgraduate = await User.findByPk(postgraduateId, {
         attributes: ['id', 'groupName', 'role']
       });
-      if (!postgraduate || postgraduate.role !== 'postgraduate') {
+      if (!postgraduate || !['student', 'postgraduate'].includes(postgraduate.role)) {
         return res.status(404).json({ error: 'Аспирант не найден' });
       }
       list = list.filter((s) => scheduleMatchesPostgraduateGroup(s, postgraduate));
@@ -166,7 +171,7 @@ router.get('/schedule', requireAuth, requireProfessorOrAdmin, async (req, res) =
   }
 });
 
-router.get('/grades/:postgraduateId/:scheduleId', requireAuth, requireProfessorOrAdmin, async (req, res) => {
+router.get('/grades/:postgraduateId/:scheduleId', requireAuth, requireSupervisorOrAdmin, async (req, res) => {
   try {
     const { postgraduateId, scheduleId } = req.params;
     
@@ -202,7 +207,7 @@ router.get('/grades/:postgraduateId/:scheduleId', requireAuth, requireProfessorO
 });
 
 router.post('/grade', requireAuth, async (req, res) => {
-  if (!['professor', 'admin'].includes(req.user.role)) {
+  if (!hasRole(req.user, ROLES.SUPERVISOR, ROLES.ADMIN)) {
     return res.status(403).json({ error: 'Недостаточно прав для выставления оценок' });
   }
   try {
@@ -220,14 +225,14 @@ router.post('/grade', requireAuth, async (req, res) => {
       })
     ]);
 
-    if (!postgraduate || postgraduate.role !== 'postgraduate') {
+    if (!postgraduate || !['student', 'postgraduate'].includes(postgraduate.role)) {
       return res.status(404).json({ error: 'Аспирант не найден' });
     }
     if (!schedule) {
       return res.status(404).json({ error: 'Занятие не найдено' });
     }
 
-    if (req.user.role === 'professor' && !scheduleBelongsToProfessor(schedule, req.user)) {
+    if (isTeachingSupervisor(req.user) && !scheduleBelongsToProfessor(schedule, req.user)) {
       return res.status(403).json({ error: 'Можно выставлять оценки только по своим дисциплинам и занятиям' });
     }
 
@@ -282,14 +287,14 @@ router.post('/grade', requireAuth, async (req, res) => {
 });
 
 // DELETE /api/journal/grade/:gradeId - Удалить оценку
-router.delete('/grade/:gradeId', requireAuth, requireProfessorOrAdmin, async (req, res) => {
+router.delete('/grade/:gradeId', requireAuth, requireSupervisorOrAdmin, async (req, res) => {
   try {
     const grade = await Grade.findByPk(req.params.gradeId);
     if (!grade) {
       return res.status(404).json({ error: 'Оценка не найдена' });
     }
 
-    if (req.user.role === 'professor') {
+    if (isTeachingSupervisor(req.user)) {
       const teaches = await professorTeachesSubject(req.user, grade.subjectId);
       if (!teaches) {
         return res.status(403).json({ error: 'Можно удалять оценки только по своим дисциплинам' });

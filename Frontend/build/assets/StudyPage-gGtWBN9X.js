@@ -1,0 +1,1 @@
+import{t as e}from"./vendor-B3KKuq2J.js";import{t}from"./SectionCard-kRY_vXV6.js";import n from"./SchedulePage-h22EXDRk.js";var r=e();function i(){return(0,r.jsx)(`div`,{className:`space-y-6`,children:(0,r.jsx)(t,{title:`Учёба`,children:(0,r.jsx)(n,{})})})}export{i as default};

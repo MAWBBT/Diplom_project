@@ -3,6 +3,8 @@ import toast from "react-hot-toast";
 import api, { getErrorMessage } from "../api/client";
 import { downloadWithAuth } from "../api/downloadWithAuth";
 import { displayUploadFilename } from "../utils/uploadFilename";
+import CabinetTabBar from "../components/cabinet/CabinetTabBar";
+import SupervisorFullOverview from "../components/cabinet/SupervisorFullOverview";
 import SectionCard from "../components/SectionCard";
 import SimpleTable from "../components/SimpleTable";
 
@@ -20,7 +22,33 @@ const PLAN_STATUS_LABEL = {
   archived: "В архиве",
 };
 
+const SUPERVISOR_TABS = [
+  ["overview", "Обзор"],
+  ["students", "Аспиранты"],
+  ["plans", "ИПР"],
+  ["attestations", "Аттестации"],
+  ["reports", "Отчётность"],
+  ["feedback", "Обратная связь"],
+  ["performance", "Успеваемость"],
+  ["calendar", "Календарь"],
+  ["notifications", "Уведомления"],
+  ["templates", "Шаблоны"],
+];
+
+const FEEDBACK_KIND_LABEL = {
+  review: "Отзыв",
+  conclusion: "Заключение",
+  recommendation: "Рекомендация",
+};
+
+const DOC_TEMPLATES = [
+  { id: 1, title: "Отзыв научного руководителя", note: "Шаблон для заключения по диссертации" },
+  { id: 2, title: "Рецензия", note: "Форма внешней рецензии" },
+  { id: 3, title: "Отчёт о научной работе", note: "Годовой отчёт аспиранта" },
+];
+
 export default function SupervisorPage() {
+  const [tab, setTab] = useState("overview");
   const [rows, setRows] = useState([]);
   const [selectedYear, setSelectedYear] = useState("2026-2027");
   const [selectedPostgraduateId, setSelectedPostgraduateId] = useState("");
@@ -31,15 +59,82 @@ export default function SupervisorPage() {
   const [rejectReason, setRejectReason] = useState("");
   const [itemDrafts, setItemDrafts] = useState({});
   const [topicDrafts, setTopicDrafts] = useState({});
+  const [overview, setOverview] = useState(null);
+  const [homeSummary, setHomeSummary] = useState(null);
+  const [notifications, setNotifications] = useState([]);
+  const [allAttestations, setAllAttestations] = useState([]);
+  const [calendarData, setCalendarData] = useState({ events: [], reminders: [] });
+  const [feedbackList, setFeedbackList] = useState([]);
+  const [feedbackForm, setFeedbackForm] = useState({ kind: "review", title: "", body: "" });
 
   useEffect(() => {
     setRejectReturnOpen(false);
     setRejectReason("");
   }, [selectedYear, selectedPostgraduateId]);
 
+  const loadSupervisorExtras = async () => {
+    try {
+      const [att, cal, fb] = await Promise.all([
+        api.get("/supervisor/attestations"),
+        api.get("/supervisor/calendar"),
+        api.get("/supervisor/feedback"),
+      ]);
+      setAllAttestations(Array.isArray(att.data) ? att.data : []);
+      setCalendarData(cal.data || { events: [], reminders: [] });
+      setFeedbackList(Array.isArray(fb.data) ? fb.data : []);
+    } catch (e) {
+      toast.error(getErrorMessage(e));
+    }
+  };
+
+  const loadOverview = async () => {
+    try {
+      const [ov, summary, notif] = await Promise.all([
+        api.get("/supervisor/overview"),
+        api.get("/profile/home-summary"),
+        api.get("/notifications"),
+      ]);
+      setOverview(ov.data);
+      setHomeSummary(summary.data);
+      setNotifications(Array.isArray(notif.data) ? notif.data : []);
+      await loadSupervisorExtras();
+    } catch (e) {
+      toast.error(getErrorMessage(e));
+    }
+  };
+
+  const submitFeedback = async () => {
+    if (!selectedPostgraduateId) {
+      toast.error("Выберите аспиранта");
+      return;
+    }
+    const title = feedbackForm.title.trim();
+    const body = feedbackForm.body.trim();
+    if (!title || !body) {
+      toast.error("Заполните заголовок и текст");
+      return;
+    }
+    try {
+      await api.post("/supervisor/feedback", {
+        postgraduateId: Number(selectedPostgraduateId),
+        kind: feedbackForm.kind,
+        title,
+        body,
+      });
+      toast.success("Обратная связь сохранена");
+      setFeedbackForm((s) => ({ ...s, title: "", body: "" }));
+      await loadSupervisorExtras();
+    } catch (e) {
+      toast.error(getErrorMessage(e));
+    }
+  };
+
   const load = async () => {
     try {
-      const data = (await api.get("/supervisor/supervisions")).data;
+      const [data] = await Promise.all([
+        api.get("/supervisor/supervisions").then((r) => r.data),
+        loadOverview(),
+      ]);
       setRows(data);
       const firstId = data?.[0]?.postgraduate?.id;
       if (firstId && !selectedPostgraduateId) setSelectedPostgraduateId(String(firstId));
@@ -203,13 +298,66 @@ export default function SupervisorPage() {
     }
   };
 
-  const riskRows = rows.map((r, idx) => ({
+  const studentRows = rows.map((r, idx) => ({
     id: r?.supervision?.id || idx + 1,
     postgraduate: r?.postgraduate?.fullName || "—",
+    enrollmentYear: r?.profile?.enrollmentYear || "—",
     groupName: r?.postgraduate?.groupName || "—",
     topic: r?.latestTopic?.title || "—",
     risk: r?.latestTopic?.status === "approved" ? "В норме" : "Риск",
   }));
+
+  const calendarEvents = useMemo(() => {
+    const events = [];
+    for (const p of bundle?.individualPlans || []) {
+      if (p.academicYear !== selectedYear && selectedYear) continue;
+      for (const it of p.items || []) {
+        if (it.dueDate) {
+          events.push({
+            id: `plan-${it.id}`,
+            date: it.dueDate,
+            title: it.title,
+            type: "Этап ИПР",
+            status: it.status,
+          });
+        }
+      }
+    }
+    for (const a of bundle?.attestations || []) {
+      if (a.attestedAt) {
+        events.push({
+          id: `att-${a.id}`,
+          date: a.attestedAt,
+          title: a.periodLabel || a.decision || "Аттестация",
+          type: "Аттестация",
+          status: "—",
+        });
+      }
+    }
+    return events
+      .filter((e) => e.date)
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
+  }, [bundle, selectedYear]);
+
+  const updateDocumentStatus = async (docId, status) => {
+    try {
+      await api.patch(`/supervisor/documents/${docId}`, { status });
+      toast.success("Статус документа обновлён");
+      await Promise.all([refreshBundle(), loadOverview()]);
+    } catch (e) {
+      toast.error(getErrorMessage(e));
+    }
+  };
+
+  const verifyPublication = async (pubId, status) => {
+    try {
+      await api.patch(`/supervisor/publications/${pubId}`, { status });
+      toast.success("Статус публикации обновлён");
+      await Promise.all([refreshBundle(), loadOverview()]);
+    } catch (e) {
+      toast.error(getErrorMessage(e));
+    }
+  };
 
   const bulkApprove = async () => {
     try {
@@ -233,38 +381,78 @@ export default function SupervisorPage() {
     }
   };
 
+  const showSupervisorToolbar = ["overview", "plans", "reports", "performance"].includes(tab);
+
   return (
     <div className="space-y-6">
-      <SectionCard title="Кабинет научного руководителя">
+      <CabinetTabBar tabs={SUPERVISOR_TABS} activeTab={tab} onTabChange={setTab} />
+
+      {showSupervisorToolbar ? (
         <div className="bg-slate-900/40 border border-slate-700/60 rounded-xl p-5 gap-4 grid md:grid-cols-2 lg:grid-cols-3 items-center">
-          <select 
-            className="w-full rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-4 py-2.5 text-sm focus:outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20 shadow-inner" 
-            value={selectedYear} 
+          <select
+            className="w-full rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-4 py-2.5 text-sm focus:outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20 shadow-inner"
+            value={selectedYear}
             onChange={(e) => setSelectedYear(e.target.value)}
           >
             <option value="2025-2026">2025-2026 год</option>
             <option value="2026-2027">2026-2027 год</option>
             <option value="2027-2028">2027-2028 год</option>
           </select>
-          <button 
-            className="w-full rounded-xl px-5 py-2.5 text-sm font-semibold border border-transparent bg-sky-400 font-medium text-slate-950 shadow-[0_8px_24px_rgba(56,189,248,0.25)] hover:shadow-[0_10px_28px_rgba(56,189,248,0.35)] hover:brightness-105 transition-all text-center" 
+          <button
+            type="button"
+            className="w-full rounded-xl px-5 py-2.5 text-sm font-semibold border border-transparent bg-sky-400 font-medium text-slate-950 shadow-[0_8px_24px_rgba(56,189,248,0.25)] hover:shadow-[0_10px_28px_rgba(56,189,248,0.35)] hover:brightness-105 transition-all text-center"
             onClick={bulkApprove}
           >
             Подтвердить отчеты группы
           </button>
-          <button 
-            className="w-full rounded-xl px-5 py-2.5 text-sm font-medium border border-slate-600 bg-slate-800/80 hover:bg-slate-700 hover:border-slate-500 text-slate-200 transition-colors" 
+          <button
+            type="button"
+            className="w-full rounded-xl px-5 py-2.5 text-sm font-medium border border-slate-600 bg-slate-800/80 hover:bg-slate-700 hover:border-slate-500 text-slate-200 transition-colors"
             onClick={load}
           >
             Обновить данные
           </button>
         </div>
-      </SectionCard>
+      ) : null}
 
-      <SectionCard title="Список ведомых и мониторинг рисков">
-        <SimpleTable rows={riskRows} />
-      </SectionCard>
+      {tab === "overview" && (
+        <SupervisorFullOverview
+          overview={overview}
+          homeSummary={homeSummary}
+          notifications={notifications}
+          onOpenTab={setTab}
+          onSelectPostgraduate={(id) => setSelectedPostgraduateId(String(id))}
+          onVerifyPublication={verifyPublication}
+          onUpdateDocument={updateDocumentStatus}
+        />
+      )}
 
+      {tab === "students" && (
+        <SectionCard title="Список закреплённых аспирантов">
+          <p className="text-xs text-slate-500 mb-4">ФИО, год поступления, тема диссертации, учебная группа.</p>
+          <SimpleTable rows={studentRows} />
+        </SectionCard>
+      )}
+
+      {(tab === "plans" || tab === "reports" || tab === "performance" || tab === "feedback") && (
+        <SectionCard title="Выбор аспиранта">
+          <select
+            className="w-full max-w-md rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-4 py-2.5 text-sm"
+            value={selectedPostgraduateId}
+            onChange={(e) => setSelectedPostgraduateId(e.target.value)}
+          >
+            {postgraduates.length === 0 ? <option value="">Нет аспирантов</option> : null}
+            {postgraduates.map((p) => (
+              <option key={p.id} value={String(p.id)}>
+                {p.fullName} {p.groupName ? `(${p.groupName})` : ""}
+              </option>
+            ))}
+          </select>
+        </SectionCard>
+      )}
+
+      {tab === "performance" && (
+      <>
       <SectionCard
         title="Успеваемость аспирантов"
         right={
@@ -331,6 +519,112 @@ export default function SupervisorPage() {
         <SimpleTable rows={grades || []} />
       </SectionCard>
 
+      <SectionCard title="Публикации и конференции">
+        <p className="text-xs text-slate-500 mb-3">Статьи и выступления (поле «Издание»).</p>
+        <SimpleTable
+          rows={(bundle?.publications || []).map((p) => ({
+            id: p.id,
+            title: p.title,
+            venue: p.venue || "—",
+            year: p.year ?? "—",
+            indexing: p.indexing || "—",
+            status: p.status,
+          }))}
+        />
+      </SectionCard>
+      </>
+      )}
+
+      {tab === "reports" && (
+      <>
+      <SectionCard title="Отчётность аспирантов">
+        <p className="text-xs text-slate-500 mb-4">Просмотр, проверка, подписание или отклонение отчётов.</p>
+        <SimpleTable
+          rows={(bundle?.documents || []).map((d) => ({
+            id: d.id,
+            title: d.title,
+            documentType: d.documentType,
+            status: d.status,
+            files: Array.isArray(d.files) ? d.files.length : 0,
+          }))}
+        />
+        <div className="mt-4 space-y-2">
+          {(bundle?.documents || []).filter((d) => d.status === "on_review").map((d) => (
+            <div key={d.id} className="flex flex-wrap gap-2 items-center text-sm">
+              <span className="text-slate-300">{d.title}</span>
+              <button type="button" className="rounded-lg px-3 py-1 text-xs bg-emerald-500/20 text-emerald-200 border border-emerald-500/40" onClick={() => updateDocumentStatus(d.id, "approved")}>Подписать / утвердить</button>
+              <button type="button" className="rounded-lg px-3 py-1 text-xs bg-rose-500/20 text-rose-200 border border-rose-500/40" onClick={() => updateDocumentStatus(d.id, "rejected")}>Отклонить</button>
+            </div>
+          ))}
+        </div>
+      </SectionCard>
+      <SectionCard title="Публикации на проверке">
+        <div className="space-y-2">
+          {(bundle?.publications || []).filter((p) => p.status === "submitted").map((p) => (
+            <div key={p.id} className="flex flex-wrap gap-2 items-center text-sm">
+              <span className="text-slate-300 truncate max-w-md">{p.title}</span>
+              <button type="button" className="rounded-lg px-3 py-1 text-xs bg-emerald-500/20 text-emerald-200 border border-emerald-500/40" onClick={() => verifyPublication(p.id, "verified")}>Подтвердить</button>
+              <button type="button" className="rounded-lg px-3 py-1 text-xs bg-rose-500/20 text-rose-200 border border-rose-500/40" onClick={() => verifyPublication(p.id, "rejected")}>Отклонить</button>
+            </div>
+          ))}
+          {!(bundle?.publications || []).some((p) => p.status === "submitted") ? <p className="text-slate-500 text-sm">Нет публикаций на проверке.</p> : null}
+        </div>
+      </SectionCard>
+      </>
+      )}
+
+      {tab === "attestations" && (
+        <SectionCard title="График аттестаций и отчётов">
+          {(calendarData.reminders || []).length > 0 ? (
+            <div className="mb-4 rounded-xl border border-amber-500/40 bg-amber-950/30 px-4 py-3 text-sm text-amber-100">
+              <p className="font-medium mb-1">Напоминания о сроках</p>
+              <ul className="list-disc pl-5 space-y-1 text-xs">
+                {(calendarData.reminders || []).slice(0, 8).map((ev) => (
+                  <li key={ev.id}>{ev.postgraduate}: {ev.title} — {new Date(ev.date).toLocaleDateString("ru-RU")}{ev.daysUntil != null ? ` (через ${ev.daysUntil} дн.)` : ""}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          <SimpleTable rows={allAttestations.map((a) => ({ id: a.id, postgraduate: a.owner?.fullName || "—", periodLabel: a.periodLabel, decision: a.decision || "—", attestedAt: a.attestedAt ? new Date(a.attestedAt).toLocaleDateString("ru-RU") : "—", reminder: a.reminder ? "Скоро" : "—" }))} />
+        </SectionCard>
+      )}
+
+      {tab === "feedback" && (
+        <>
+          <SectionCard title="Обратная связь">
+            <p className="text-xs text-slate-500 mb-4">Отзывы, заключения и рекомендации.</p>
+            <div className="grid md:grid-cols-2 gap-3 mb-4 max-w-3xl">
+              <select className="rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-4 py-2.5 text-sm" value={feedbackForm.kind} onChange={(e) => setFeedbackForm((st) => ({ ...st, kind: e.target.value }))}>
+                <option value="review">Отзыв</option><option value="conclusion">Заключение</option><option value="recommendation">Рекомендация</option>
+              </select>
+              <input className="rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-4 py-2.5 text-sm" placeholder="Заголовок" value={feedbackForm.title} onChange={(e) => setFeedbackForm((st) => ({ ...st, title: e.target.value }))} />
+            </div>
+            <textarea rows={5} className="w-full rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-4 py-3 text-sm mb-3" placeholder="Текст" value={feedbackForm.body} onChange={(e) => setFeedbackForm((st) => ({ ...st, body: e.target.value }))} />
+            <button type="button" className="rounded-xl px-5 py-2.5 text-sm font-semibold bg-sky-400 text-slate-950" onClick={submitFeedback}>Сохранить и отправить аспиранту</button>
+          </SectionCard>
+          <SectionCard title="Ранее созданные">
+            <SimpleTable rows={feedbackList.map((f) => ({ id: f.id, postgraduate: f.postgraduate?.fullName || "—", kind: FEEDBACK_KIND_LABEL[f.kind] || f.kind, title: f.title, createdAt: f.createdAt ? new Date(f.createdAt).toLocaleDateString("ru-RU") : "—" }))} />
+          </SectionCard>
+        </>
+      )}
+
+      {tab === "notifications" && (
+        <SectionCard title="Уведомления">
+          <p className="text-xs text-slate-500 mb-4">Новые отчёты, сообщения от аспирантов и деканата.</p>
+          <div className="space-y-2">
+            {(notifications || []).map((n) => (
+              <div key={n.id} className={`rounded-xl px-4 py-3 border text-sm ${n.readAt ? "border-slate-700/50 bg-slate-900/30 text-slate-400" : "border-sky-500/30 bg-sky-950/20 text-sky-100"}`}>
+                <p className="font-medium">{n.title || "Уведомление"}</p>
+                <p className="text-xs mt-1 opacity-80">{n.body || "—"}</p>
+              </div>
+            ))}
+            {!notifications?.length ? <p className="text-slate-500 text-sm">Уведомлений нет.</p> : null}
+          </div>
+        </SectionCard>
+      )}
+
+      {tab === "plans" && (
+      <>
       <SectionCard title="Индивидуальный план работы (ИПР)">
         {!selectedPostgraduateId ? (
           <div className="text-slate-400 text-sm">Выберите аспиранта выше.</div>
@@ -677,6 +971,65 @@ export default function SupervisorPage() {
           ) : null}
         </div>
       </SectionCard>
+      </>
+      )}
+
+
+      {tab === "calendar" && (
+        <SectionCard title="Календарь ключевых событий">
+          <select
+            className="w-full max-w-md rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-4 py-2.5 text-sm mb-4"
+            value={selectedPostgraduateId}
+            onChange={(e) => setSelectedPostgraduateId(e.target.value)}
+          >
+            {postgraduates.map((p) => (
+              <option key={p.id} value={String(p.id)}>
+                {p.fullName}
+              </option>
+            ))}
+          </select>
+          <div className="space-y-2">
+            {(calendarData.events?.length ? calendarData.events : calendarEvents).map((ev) => (
+              <div
+                key={ev.id}
+                className="flex flex-wrap justify-between gap-2 rounded-xl border border-slate-700/60 bg-slate-950/35 px-4 py-3 text-sm"
+              >
+                <div>
+                  <p className="text-slate-100 font-medium">{ev.title}</p>
+                  <p className="text-xs text-slate-500">
+                    {ev.postgraduate ? `${ev.postgraduate} · ` : ""}
+                    {ev.type}
+                  </p>
+                </div>
+                <span className={`text-sm ${ev.reminder ? "text-amber-300" : "text-sky-200"}`}>
+                  {new Date(ev.date).toLocaleDateString("ru-RU")}
+                  {ev.reminder && ev.daysUntil != null ? ` · через ${ev.daysUntil} дн.` : ""}
+                  {ev.status ? ` · ${ev.status}` : ""}
+                </span>
+              </div>
+            ))}
+            {!(calendarData.events?.length || calendarEvents.length) ? (
+              <p className="text-slate-500 text-sm">Нет событий на {selectedYear}.</p>
+            ) : null}
+          </div>
+        </SectionCard>
+      )}
+
+      {tab === "templates" && (
+        <SectionCard title="Шаблоны документов">
+          <p className="text-xs text-slate-500 mb-4">
+            Типовые формы отзывов, рецензий и отчётов. Файлы можно разместить в общей папке кафедры; здесь — справочник.
+          </p>
+          <div className="space-y-3">
+            {DOC_TEMPLATES.map((t) => (
+              <div key={t.id} className="rounded-xl border border-slate-700/60 bg-slate-950/35 px-4 py-3">
+                <p className="text-slate-100 font-medium">{t.title}</p>
+                <p className="text-xs text-slate-500 mt-1">{t.note}</p>
+              </div>
+            ))}
+          </div>
+        </SectionCard>
+      )}
     </div>
   );
 }

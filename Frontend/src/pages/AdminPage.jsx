@@ -6,7 +6,7 @@ import SectionCard from "../components/SectionCard";
 export default function AdminPage() {
   const [users, setUsers] = useState([]);
   const [audit, setAudit] = useState([]);
-  const [form, setForm] = useState({ login: "", password: "", fullName: "", role: "postgraduate" });
+  const [form, setForm] = useState({ login: "", password: "", fullName: "", role: "student" });
   const [q, setQ] = useState("");
   const [roleFilter, setRoleFilter] = useState("");
 
@@ -105,10 +105,9 @@ export default function AdminPage() {
             value={form.role} 
             onChange={(e) => setForm({ ...form, role: e.target.value })}
           >
-            <option value="postgraduate">Аспирант</option>
-            <option value="professor">Профессор</option>
+            <option value="student">Аспирант</option>
+            <option value="supervisor">Научный руководитель</option>
             <option value="admin">Администратор</option>
-            <option value="program_admin">Админ программы</option>
           </select>
           <button 
              className="w-full rounded-xl px-4 py-2.5 text-sm font-semibold border border-transparent bg-sky-400 font-medium text-slate-950 shadow-[0_8px_24px_rgba(56,189,248,0.25)] hover:shadow-[0_10px_28px_rgba(56,189,248,0.35)] hover:brightness-105 transition-all" 
@@ -134,10 +133,9 @@ export default function AdminPage() {
             onChange={(e) => setRoleFilter(e.target.value)}
           >
             <option value="">Все роли</option>
-            <option value="postgraduate">Аспирант</option>
-            <option value="professor">Профессор</option>
+            <option value="student">Аспирант</option>
+            <option value="supervisor">Научный руководитель</option>
             <option value="admin">Администратор</option>
-            <option value="program_admin">Админ программы</option>
           </select>
           <button
             className="w-full rounded-xl px-4 py-2.5 text-sm font-semibold border border-transparent bg-sky-400 font-medium text-slate-950 shadow-[0_8px_24px_rgba(56,189,248,0.25)] hover:shadow-[0_10px_28px_rgba(56,189,248,0.35)] hover:brightness-105 transition-all"

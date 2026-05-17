@@ -5,6 +5,7 @@ import api, { getErrorMessage } from "../api/client";
 import SectionCard from "../components/SectionCard";
 import SimpleTable from "../components/SimpleTable";
 import { useAuthStore } from "../store/authStore";
+import { ROLES, roleMatches } from "../utils/roles";
 import { COLUMN_LABELS, formatTableCell } from "../utils/tableLabels";
 
 const fld =
@@ -82,7 +83,7 @@ const GRADE_TABLE_KEYS = ["postgraduate", "subject", "controlType", "grade", "co
 export default function GradesPage() {
   const { user } = useAuthStore();
   const location = useLocation();
-  const isStaff = ["professor", "admin"].includes(user?.role);
+  const isStaff = roleMatches(user?.role, [ROLES.SUPERVISOR, ROLES.ADMIN]);
   const isAdmin = user?.role === "admin";
 
   const [tab, setTab] = useState(() => location.state?.tab || "journal");
@@ -104,7 +105,7 @@ export default function GradesPage() {
       setTab(location.state.tab);
       return;
     }
-    if (user.role === "postgraduate") setTab("list");
+    if (roleMatches(user.role, [ROLES.STUDENT])) setTab("list");
   }, [user?.id, user?.role, location.state?.tab]);
 
   const loadStaff = useCallback(async (quiet) => {

@@ -6,11 +6,15 @@ const router = express.Router();
 const planItemUploadRoot = path.join(__dirname, '../uploads/plan-items');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { Op } = require('sequelize');
-const { userSupervisesPostgraduate } = require('../utils/supervision');
+const {
+  userSupervisesPostgraduate,
+  supervisedPostgraduateIds,
+  supervisionsForPostgraduate
+} = require('../utils/supervision');
+const { messageToFeedback } = require('../utils/feedbackMessage');
 const { notifyUser } = require('../utils/notify');
 const { writeAudit } = require('../utils/audit');
 const {
-  Supervision,
   User,
   PostgraduateProfile,
   DissertationTopic,
@@ -25,12 +29,12 @@ const {
   AcademicDocument,
   DocumentFile,
   Program,
-  DissertationTopicHistory
+  Message
 } = require('../models');
 const { markOverduePlanItems, calendarTodayISO, dateOnlyString } = require('../utils/planItemOverdue');
 const { sendFileDownload } = require('../utils/uploadFilename');
 
-const profOnly = [requireAuth, requireRole('professor')];
+const supervisorOnly = [requireAuth, requireRole('supervisor')];
 
 async function assertSupervises(res, supervisorId, postgraduateId) {
   const ok = await userSupervisesPostgraduate(supervisorId, postgraduateId);
@@ -39,6 +43,69 @@ async function assertSupervises(res, supervisorId, postgraduateId) {
     return false;
   }
   return true;
+}
+
+function daysUntilDate(isoDate) {
+  if (!isoDate) return null;
+  const today = calendarTodayISO();
+  const a = new Date(today);
+  const b = new Date(String(isoDate).slice(0, 10));
+  return Math.round((b - a) / (24 * 60 * 60 * 1000));
+}
+
+async function buildSupervisorCalendar(pgIds) {
+  const events = [];
+  if (!pgIds.length) return events;
+
+  const plansWithItems = await IndividualPlan.findAll({
+    where: { userId: { [Op.in]: pgIds } },
+    include: [
+      { model: PlanItem, as: 'items' },
+      { model: User, as: 'owner', attributes: ['id', 'fullName'] }
+    ]
+  });
+  for (const plan of plansWithItems) {
+    const pgName = plan.owner?.fullName || '—';
+    for (const it of plan.items || []) {
+      if (!it.dueDate) continue;
+      const daysUntil = daysUntilDate(it.dueDate);
+      events.push({
+        id: `pi-${it.id}`,
+        postgraduateId: plan.userId,
+        postgraduate: pgName,
+        date: it.dueDate,
+        title: it.title,
+        type: 'Этап ИПР / отчёт',
+        status: it.status,
+        daysUntil,
+        reminder: daysUntil !== null && daysUntil >= 0 && daysUntil <= 14
+      });
+    }
+  }
+
+  const attestations = await Attestation.findAll({
+    where: { userId: { [Op.in]: pgIds } },
+    include: [{ model: User, as: 'owner', attributes: ['id', 'fullName'] }],
+    order: [['attestedAt', 'DESC']]
+  });
+  for (const a of attestations) {
+    if (!a.attestedAt) continue;
+    const daysUntil = daysUntilDate(a.attestedAt);
+    events.push({
+      id: `att-${a.id}`,
+      postgraduateId: a.userId,
+      postgraduate: a.owner?.fullName || '—',
+      date: a.attestedAt,
+      title: a.periodLabel || a.decision || 'Аттестация',
+      type: 'Аттестация',
+      status: a.decision || '—',
+      daysUntil,
+      reminder: daysUntil !== null && daysUntil >= 0 && daysUntil <= 30
+    });
+  }
+
+  events.sort((x, y) => new Date(x.date) - new Date(y.date));
+  return events;
 }
 
 async function loadPostgraduateBundle(postgraduateId) {
@@ -58,8 +125,7 @@ async function loadPostgraduateBundle(postgraduateId) {
     publications,
     attestations,
     documents,
-    supervisions,
-    topicHistory
+    supervisions
   ] = await Promise.all([
     PostgraduateProfile.findOne({
       where: { userId: postgraduateId },
@@ -96,18 +162,7 @@ async function loadPostgraduateBundle(postgraduateId) {
       ],
       order: [['updatedAt', 'DESC']]
     }),
-    Supervision.findAll({
-      where: { postgraduateId, isActive: true },
-      include: [
-        { model: User, as: 'supervisor', attributes: ['id', 'fullName', 'email', 'login'] }
-      ]
-    }),
-    DissertationTopicHistory.findAll({
-      where: { userId: postgraduateId },
-      order: [['createdAt', 'DESC']],
-      limit: 20,
-      include: [{ model: User, as: 'changedBy', attributes: ['id', 'fullName'] }]
-    })
+    supervisionsForPostgraduate(postgraduateId)
   ]);
 
   const pgUser = await User.findByPk(postgraduateId, {
@@ -123,42 +178,185 @@ async function loadPostgraduateBundle(postgraduateId) {
     attestations,
     documents,
     supervisions,
-    topicHistory
+    topicHistory: []
   };
 }
 
-router.get('/supervisions', ...profOnly, async (req, res) => {
+router.get('/overview', ...supervisorOnly, async (req, res) => {
   try {
-    const rows = await Supervision.findAll({
-      where: { supervisorId: req.user.id, isActive: true },
+    const profiles = await PostgraduateProfile.findAll({
+      where: { supervisorId: req.user.id },
       include: [
         {
           model: User,
-          as: 'postgraduate',
+          as: 'user',
           attributes: ['id', 'fullName', 'login', 'email', 'groupName']
         }
       ],
-      order: [['startedAt', 'DESC']]
+      order: [['supervisionStartedAt', 'DESC']]
     });
 
-    const enriched = await Promise.all(
-      rows.map(async (s) => {
-        const pg = s.postgraduate;
-        const profile = pg
-          ? await PostgraduateProfile.findOne({ where: { userId: pg.id } })
-          : null;
+    const pgIds = profiles.map((p) => p.userId).filter(Boolean);
+    if (!pgIds.length) {
+      return res.json({
+        students: [],
+        pendingPlans: [],
+        documentsOnReview: [],
+        publicationsPending: [],
+        overduePlanItems: [],
+        upcomingEvents: [],
+        recentGrades: []
+      });
+    }
+
+    for (const pgId of pgIds) {
+      const plans = await IndividualPlan.findAll({ where: { userId: pgId }, attributes: ['id'] });
+      await markOverduePlanItems(PlanItem, plans.map((p) => p.id));
+    }
+
+    const { supervisionRow } = require('../utils/supervisionProfile');
+    const students = await Promise.all(
+      profiles.map(async (profile) => {
+        const pg = profile.user;
         const topic = pg
           ? await DissertationTopic.findOne({
               where: { userId: pg.id },
               order: [['updatedAt', 'DESC']]
             })
           : null;
+        const activePlan = pg
+          ? await IndividualPlan.findOne({
+              where: { userId: pg.id },
+              order: [['academicYear', 'DESC']]
+            })
+          : null;
         return {
-          supervision: s.toJSON(),
+          supervision: supervisionRow(profile, 'primary'),
           postgraduate: pg ? pg.toSafeJSON() : null,
           profile,
-          latestTopic: topic
+          latestTopic: topic,
+          latestPlanStatus: activePlan?.status ?? null,
+          latestPlanYear: activePlan?.academicYear ?? null
         };
+      })
+    );
+
+    const [pendingPlans, documentsOnReview, publicationsPending, overduePlanItems, recentGrades] =
+      await Promise.all([
+        IndividualPlan.findAll({
+          where: { userId: { [Op.in]: pgIds }, status: 'submitted' },
+          include: [
+            { model: User, as: 'owner', attributes: ['id', 'fullName'] },
+            { model: DissertationTopic, as: 'dissertationTopic', attributes: ['id', 'title'] }
+          ],
+          order: [['updatedAt', 'DESC']]
+        }),
+        AcademicDocument.findAll({
+          where: { userId: { [Op.in]: pgIds }, status: 'on_review' },
+          include: [{ model: User, as: 'owner', attributes: ['id', 'fullName'] }],
+          order: [['updatedAt', 'DESC']]
+        }),
+        Publication.findAll({
+          where: { userId: { [Op.in]: pgIds }, status: 'submitted' },
+          include: [{ model: User, as: 'author', attributes: ['id', 'fullName'] }],
+          order: [['updatedAt', 'DESC']]
+        }),
+        PlanItem.findAll({
+          where: { status: 'overdue' },
+          include: [
+            {
+              model: IndividualPlan,
+              as: 'plan',
+              where: { userId: { [Op.in]: pgIds } },
+              required: true,
+              attributes: ['id', 'academicYear', 'userId'],
+              include: [{ model: User, as: 'owner', attributes: ['id', 'fullName'] }]
+            }
+          ],
+          order: [['dueDate', 'ASC']],
+          limit: 30
+        }),
+        Grade.findAll({
+          where: { userId: { [Op.in]: pgIds } },
+          include: [
+            { model: Subject, as: 'subjectRef', attributes: ['id', 'name'] },
+            { model: User, as: 'user', attributes: ['id', 'fullName'] }
+          ],
+          order: [['createdAt', 'DESC']],
+          limit: 40
+        })
+      ]);
+
+    const upcomingEvents = [];
+    const plansWithItems = await IndividualPlan.findAll({
+      where: { userId: { [Op.in]: pgIds } },
+      include: [
+        { model: PlanItem, as: 'items' },
+        { model: User, as: 'owner', attributes: ['id', 'fullName'] }
+      ]
+    });
+    for (const plan of plansWithItems) {
+      const pgName = plan.owner?.fullName || '—';
+      for (const it of plan.items || []) {
+        if (it.dueDate) {
+          upcomingEvents.push({
+            id: `pi-${it.id}`,
+            postgraduate: pgName,
+            date: it.dueDate,
+            title: it.title,
+            type: 'Этап ИПР',
+            status: it.status
+          });
+        }
+      }
+    }
+    const attestations = await Attestation.findAll({
+      where: { userId: { [Op.in]: pgIds } },
+      include: [{ model: User, as: 'owner', attributes: ['id', 'fullName'] }],
+      order: [['attestedAt', 'DESC']],
+      limit: 20
+    });
+    for (const a of attestations) {
+      if (a.attestedAt) {
+        upcomingEvents.push({
+          id: `att-${a.id}`,
+          postgraduate: a.owner?.fullName || '—',
+          date: a.attestedAt,
+          title: a.periodLabel || a.decision || 'Аттестация',
+          type: 'Аттестация',
+          status: '—'
+        });
+      }
+    }
+    upcomingEvents.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    res.json({
+      students,
+      pendingPlans,
+      documentsOnReview,
+      publicationsPending,
+      overduePlanItems,
+      upcomingEvents: upcomingEvents.slice(0, 40),
+      recentGrades
+    });
+  } catch (error) {
+    console.error('supervisor/overview:', error);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+router.get('/supervisions', ...supervisorOnly, async (req, res) => {
+  try {
+    const { supervisionsForSupervisor } = require('../utils/supervisionProfile');
+    const enriched = await supervisionsForSupervisor(req.user.id);
+    await Promise.all(
+      enriched.map(async (row) => {
+        const pgId = row.postgraduate?.id;
+        if (!pgId) return;
+        row.latestTopic = await DissertationTopic.findOne({
+          where: { userId: pgId },
+          order: [['updatedAt', 'DESC']]
+        });
       })
     );
 
@@ -169,7 +367,7 @@ router.get('/supervisions', ...profOnly, async (req, res) => {
   }
 });
 
-router.get('/postgraduate/:userId', ...profOnly, async (req, res) => {
+router.get('/postgraduate/:userId', ...supervisorOnly, async (req, res) => {
   try {
     const pgId = parseInt(req.params.userId, 10);
     if (!await assertSupervises(res, req.user.id, pgId)) return;
@@ -182,7 +380,7 @@ router.get('/postgraduate/:userId', ...profOnly, async (req, res) => {
 });
 
 // GET /api/supervisor/grades/:postgraduateId - оценки аспиранта (только для руководителя этого аспиранта)
-router.get('/grades/:postgraduateId', ...profOnly, async (req, res) => {
+router.get('/grades/:postgraduateId', ...supervisorOnly, async (req, res) => {
   try {
     const postgraduateId = parseInt(req.params.postgraduateId, 10);
     if (!postgraduateId) {
@@ -229,7 +427,7 @@ router.get('/grades/:postgraduateId', ...profOnly, async (req, res) => {
   }
 });
 
-router.patch('/plans/:planId', ...profOnly, async (req, res) => {
+router.patch('/plans/:planId', ...supervisorOnly, async (req, res) => {
   try {
     const plan = await IndividualPlan.findByPk(req.params.planId);
     if (!plan) return res.status(404).json({ error: 'План не найден' });
@@ -272,7 +470,7 @@ router.patch('/plans/:planId', ...profOnly, async (req, res) => {
   }
 });
 
-router.patch('/plan-items/:itemId', ...profOnly, async (req, res) => {
+router.patch('/plan-items/:itemId', ...supervisorOnly, async (req, res) => {
   try {
     const item = await PlanItem.findByPk(req.params.itemId, {
       include: [{ model: IndividualPlan, as: 'plan' }]
@@ -363,7 +561,7 @@ router.patch('/plan-items/:itemId', ...profOnly, async (req, res) => {
   }
 });
 
-router.get('/plan-items/:itemId/files/:fileId/download', ...profOnly, async (req, res) => {
+router.get('/plan-items/:itemId/files/:fileId/download', ...supervisorOnly, async (req, res) => {
   try {
     const item = await PlanItem.findByPk(req.params.itemId, {
       include: [{ model: IndividualPlan, as: 'plan' }]
@@ -383,7 +581,7 @@ router.get('/plan-items/:itemId/files/:fileId/download', ...profOnly, async (req
   }
 });
 
-router.patch('/topics/:id', ...profOnly, async (req, res) => {
+router.patch('/topics/:id', ...supervisorOnly, async (req, res) => {
   try {
     const t = await DissertationTopic.findByPk(req.params.id);
     if (!t) return res.status(404).json({ error: 'Не найдено' });
@@ -447,7 +645,7 @@ router.patch('/topics/:id', ...profOnly, async (req, res) => {
   }
 });
 
-router.patch('/documents/:id', ...profOnly, async (req, res) => {
+router.patch('/documents/:id', ...supervisorOnly, async (req, res) => {
   try {
     const d = await AcademicDocument.findByPk(req.params.id);
     if (!d) return res.status(404).json({ error: 'Не найдено' });
@@ -471,7 +669,7 @@ router.patch('/documents/:id', ...profOnly, async (req, res) => {
   }
 });
 
-router.patch('/publications/:id', ...profOnly, async (req, res) => {
+router.patch('/publications/:id', ...supervisorOnly, async (req, res) => {
   try {
     const p = await Publication.findByPk(req.params.id);
     if (!p) return res.status(404).json({ error: 'Не найдено' });
@@ -489,7 +687,7 @@ router.patch('/publications/:id', ...profOnly, async (req, res) => {
   }
 });
 
-router.get('/documents/:docId/files/:fileId/download', ...profOnly, async (req, res) => {
+router.get('/documents/:docId/files/:fileId/download', ...supervisorOnly, async (req, res) => {
   try {
     const d = await AcademicDocument.findByPk(req.params.docId);
     if (!d) return res.status(404).json({ error: 'Не найдено' });
@@ -508,17 +706,142 @@ router.get('/documents/:docId/files/:fileId/download', ...profOnly, async (req, 
   }
 });
 
-router.post('/plans/bulk-approve', ...profOnly, async (req, res) => {
+// GET /api/supervisor/calendar — календарь событий по всем подопечным
+router.get('/calendar', ...supervisorOnly, async (req, res) => {
+  try {
+    const pgIds = await supervisedPostgraduateIds(req.user.id);
+    const events = await buildSupervisorCalendar(pgIds);
+    const reminders = events.filter((e) => e.reminder);
+    res.json({ events, reminders, generatedAt: new Date().toISOString() });
+  } catch (error) {
+    console.error('supervisor/calendar:', error);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+// GET /api/supervisor/attestations — график аттестаций всех подопечных
+router.get('/attestations', ...supervisorOnly, async (req, res) => {
+  try {
+    const pgIds = await supervisedPostgraduateIds(req.user.id);
+    if (!pgIds.length) return res.json([]);
+
+    const rows = await Attestation.findAll({
+      where: { userId: { [Op.in]: pgIds } },
+      include: [
+        { model: User, as: 'owner', attributes: ['id', 'fullName', 'groupName'] },
+        { model: AttestationFile, as: 'files' }
+      ],
+      order: [['attestedAt', 'DESC'], ['createdAt', 'DESC']]
+    });
+
+    const enriched = rows.map((a) => {
+      const json = a.toJSON();
+      const daysUntil = daysUntilDate(a.attestedAt);
+      return {
+        ...json,
+        daysUntil,
+        reminder: daysUntil !== null && daysUntil >= 0 && daysUntil <= 30
+      };
+    });
+    res.json(enriched);
+  } catch (error) {
+    console.error('supervisor/attestations:', error);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+// GET /api/supervisor/feedback — отзывы и заключения
+router.get('/feedback', ...supervisorOnly, async (req, res) => {
+  try {
+    const pgIds = await supervisedPostgraduateIds(req.user.id);
+    if (!pgIds.length) return res.json([]);
+
+    const postgraduateId = req.query.postgraduateId
+      ? parseInt(req.query.postgraduateId, 10)
+      : null;
+    const msgWhere = {
+      messageType: 'supervisor_feedback',
+      senderId: req.user.id
+    };
+    if (postgraduateId) {
+      if (!pgIds.includes(postgraduateId)) {
+        return res.status(403).json({ error: 'Нет доступа к этому аспиранту' });
+      }
+      msgWhere.recipientId = postgraduateId;
+    } else {
+      msgWhere.recipientId = { [Op.in]: pgIds };
+    }
+    const rows = await Message.findAll({
+      where: msgWhere,
+      include: [{ model: User, as: 'recipient', attributes: ['id', 'fullName', 'groupName'] }],
+      order: [['createdAt', 'DESC']]
+    });
+    res.json(rows.map(messageToFeedback));
+  } catch (error) {
+    console.error('supervisor/feedback GET:', error);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+// POST /api/supervisor/feedback — создать отзыв / заключение / рекомендацию
+router.post('/feedback', ...supervisorOnly, async (req, res) => {
+  try {
+    const { postgraduateId, kind, title, body } = req.body || {};
+    const pgId = parseInt(postgraduateId, 10);
+    if (!pgId) return res.status(400).json({ error: 'Укажите postgraduateId' });
+    if (!await assertSupervises(res, req.user.id, pgId)) return;
+
+    const trimmedTitle = String(title || '').trim();
+    const trimmedBody = String(body || '').trim();
+    if (!trimmedTitle || !trimmedBody) {
+      return res.status(400).json({ error: 'Укажите заголовок и текст' });
+    }
+    const feedbackKind = ['review', 'conclusion', 'recommendation'].includes(kind)
+      ? kind
+      : 'review';
+
+    const row = await Message.create({
+      senderId: req.user.id,
+      recipientId: pgId,
+      topic: trimmedTitle,
+      text: trimmedBody,
+      messageType: 'supervisor_feedback',
+      feedbackKind: feedbackKind,
+      isRead: false
+    });
+
+    const kindRu =
+      feedbackKind === 'conclusion'
+        ? 'Заключение'
+        : feedbackKind === 'recommendation'
+          ? 'Рекомендация'
+          : 'Отзыв';
+    await notifyUser(
+      pgId,
+      'Обратная связь от руководителя',
+      `${kindRu}: ${trimmedTitle}`,
+      '/postgraduate'
+    );
+    await writeAudit(req.user.id, 'supervisor_feedback_create', 'Message', row.id, {
+      postgraduateId: pgId,
+      kind: feedbackKind
+    });
+
+    res.status(201).json(messageToFeedback(row));
+  } catch (error) {
+    console.error('supervisor/feedback POST:', error);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
+  }
+});
+
+router.post('/plans/bulk-approve', ...supervisorOnly, async (req, res) => {
   try {
     const { academicYear } = req.body || {};
     if (!academicYear) {
       return res.status(400).json({ error: 'Укажите academicYear' });
     }
 
-    const rows = await Supervision.findAll({
-      where: { supervisorId: req.user.id, isActive: true }
-    });
-    const postgraduateIds = rows.map((r) => r.postgraduateId);
+    const postgraduateIds = await supervisedPostgraduateIds(req.user.id);
     if (!postgraduateIds.length) {
       return res.json({ updated: 0 });
     }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import api, { getErrorMessage } from "../api/client";
 import SectionCard from "../components/SectionCard";
 import { useAuthStore } from "../store/authStore";
+import { ROLES, roleMatches } from "../utils/roles";
 
 export default function HomePage() {
   const { user } = useAuthStore();
@@ -13,7 +14,7 @@ export default function HomePage() {
   const [summaryError, setSummaryError] = useState("");
 
   useEffect(() => {
-    if (!user || user.role === "postgraduate") {
+    if (!user || roleMatches(user.role, [ROLES.STUDENT])) {
       setSummary(null);
       setSummaryError("");
       return undefined;
@@ -33,7 +34,7 @@ export default function HomePage() {
   }, [user]);
 
   useEffect(() => {
-    if (!user || user.role !== "postgraduate") {
+    if (!user || !roleMatches(user.role, [ROLES.STUDENT])) {
       setDashboard(null);
       setNotifications([]);
       setLoadError("");
@@ -106,7 +107,7 @@ export default function HomePage() {
 
   return (
     <div className="space-y-6">
-      {user && user.role !== "postgraduate" && (
+      {user && !roleMatches(user.role, [ROLES.STUDENT]) && (
         <SectionCard title="Сводка">
           {summaryError ? (
             <div className="rounded-xl border border-rose-500/40 bg-rose-950/40 px-4 py-3 text-rose-100 text-sm mb-4">
@@ -119,26 +120,21 @@ export default function HomePage() {
             {user.role === "admin" && summary?.metrics ? (
               <>
                 <Metric title="Пользователей" value={summary.metrics.usersTotal} />
-                <Metric title="Аспирантов" value={summary.metrics.postgraduates} />
+                <Metric title="Аспирантов" value={summary.metrics.students ?? summary.metrics.postgraduates} />
+                <Metric title="Просроченных этапов" value={summary.metrics.overduePlanItems} />
               </>
             ) : null}
-            {user.role === "professor" && summary?.metrics ? (
+            {roleMatches(user.role, [ROLES.SUPERVISOR]) && summary?.metrics ? (
               <>
                 <Metric title="Подопечных" value={summary.metrics.supervisedPostgraduates} />
                 <Metric title="Планов на согласовании" value={summary.metrics.plansPendingApproval} />
-              </>
-            ) : null}
-            {user.role === "program_admin" && summary?.metrics ? (
-              <>
-                <Metric title="Аспирантов" value={summary.metrics.postgraduates} />
-                <Metric title="Просроченных этапов" value={summary.metrics.overduePlanItems} />
               </>
             ) : null}
           </div>
         </SectionCard>
       )}
 
-      {user?.role === "postgraduate" && (
+      {roleMatches(user?.role, [ROLES.STUDENT]) && (
         <>
           {loading && <p className="text-slate-400 text-sm">Загрузка дашборда…</p>}
           {loadError && (

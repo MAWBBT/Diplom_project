@@ -20,6 +20,8 @@ function canAccessMessage(user, msg) {
   return msg.senderId === user.id || msg.recipientId === user.id;
 }
 
+const personalOnly = { messageType: { [Op.ne]: 'supervisor_feedback' } };
+
 const uploadRoot = path.join(__dirname, '../uploads/messages');
 if (!fs.existsSync(uploadRoot)) {
   fs.mkdirSync(uploadRoot, { recursive: true });
@@ -59,9 +61,14 @@ const upload = multer({
 async function buildConversationRow(userId, peer) {
   const lastMessage = await Message.findOne({
     where: {
-      [Op.or]: [
-        { senderId: userId, recipientId: peer.id },
-        { senderId: peer.id, recipientId: userId }
+      [Op.and]: [
+        personalOnly,
+        {
+          [Op.or]: [
+            { senderId: userId, recipientId: peer.id },
+            { senderId: peer.id, recipientId: userId }
+          ]
+        }
       ]
     },
     order: [['createdAt', 'DESC']],
@@ -75,7 +82,8 @@ async function buildConversationRow(userId, peer) {
     where: {
       senderId: peer.id,
       recipientId: userId,
-      isRead: false
+      isRead: false,
+      ...personalOnly
     }
   });
 
@@ -170,6 +178,7 @@ router.get('/:userId', requireAuth, async (req, res) => {
     const where = q
       ? {
           [Op.and]: [
+            personalOnly,
             { [Op.or]: threadOr },
             {
               [Op.or]: [
@@ -179,7 +188,7 @@ router.get('/:userId', requireAuth, async (req, res) => {
             }
           ]
         }
-      : { [Op.or]: threadOr };
+      : { [Op.and]: [personalOnly, { [Op.or]: threadOr }] };
 
     await Message.update(
       { isRead: true },
@@ -246,7 +255,7 @@ router.get('/', requireAuth, async (req, res) => {
     
     // Получаем входящие сообщения
     const messages = await Message.findAll({
-      where: { recipientId: userId },
+      where: { recipientId: userId, ...personalOnly },
       include: [
         {
           model: User,

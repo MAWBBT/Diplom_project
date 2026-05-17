@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
+const { Op } = require('sequelize');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { studentRoleWhere } = require('../utils/roles');
 const {
   User,
   PostgraduateProfile,
@@ -14,13 +16,13 @@ const {
   syncAndCountOverduePlanItemsForUser
 } = require('../utils/planItemOverdue');
 
-const adminProgOnly = [requireAuth, requireRole('program_admin')];
+const adminProgOnly = [requireAuth, requireRole('admin')];
 
 router.get('/overview', ...adminProgOnly, async (req, res) => {
   try {
     const [totalPostgraduates, totalProfessors] = await Promise.all([
-      User.count({ where: { role: 'postgraduate' } }),
-      User.count({ where: { role: 'professor' } })
+      User.count({ where: studentRoleWhere() }),
+      User.count({ where: { role: { [Op.in]: ['supervisor', 'professor'] } } })
     ]);
 
     const overduePlanItems = await syncAndCountAllOverduePlanItems(PlanItem, IndividualPlan);
@@ -48,7 +50,7 @@ router.get('/overview', ...adminProgOnly, async (req, res) => {
 router.get('/postgraduates', ...adminProgOnly, async (req, res) => {
   try {
     const users = await User.findAll({
-      where: { role: 'postgraduate' },
+      where: studentRoleWhere(),
       attributes: { exclude: ['password'] },
       order: [['groupName', 'ASC'], ['fullName', 'ASC']]
     });
@@ -107,7 +109,7 @@ router.get('/milestones/overdue', ...adminProgOnly, overduePlanItemsListHandler)
 router.get('/export/postgraduates.csv', ...adminProgOnly, async (req, res) => {
   try {
     const users = await User.findAll({
-      where: { role: 'postgraduate' },
+      where: studentRoleWhere(),
       attributes: ['id', 'login', 'fullName', 'groupName', 'email', 'phone'],
       order: [['fullName', 'ASC']]
     });

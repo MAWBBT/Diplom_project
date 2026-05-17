@@ -6,7 +6,7 @@ function normName(s) {
 function canManageScheduleRow(user, row) {
   if (!user || !row) return false;
   if (user.role === 'admin') return true;
-  if (user.role === 'professor') {
+  if (user.role === 'supervisor' || user.role === 'professor') {
     const t = normName(row.teacher);
     const me = normName(user.fullName);
     if (!t || !me) return false;

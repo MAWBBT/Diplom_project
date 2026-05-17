@@ -4,6 +4,7 @@ import api, { getErrorMessage } from "../api/client";
 import SectionCard from "../components/SectionCard";
 import SimpleTable from "../components/SimpleTable";
 import { useAuthStore } from "../store/authStore";
+import { ROLES, roleMatches } from "../utils/roles";
 
 function itemsToRows(items) {
   return (items || []).map((it, idx) => ({
@@ -18,8 +19,8 @@ function itemsToRows(items) {
 
 export default function CurriculumPage() {
   const { user } = useAuthStore();
-  const isAdmin = user?.role === "admin";
-  const isPostgraduate = user?.role === "postgraduate";
+  const isAdmin = roleMatches(user?.role, [ROLES.ADMIN]);
+  const isPostgraduate = roleMatches(user?.role, [ROLES.STUDENT]);
 
   const [programs, setPrograms] = useState([]);
   const [subjects, setSubjects] = useState([]);

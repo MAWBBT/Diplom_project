@@ -2,16 +2,16 @@ const express = require('express');
 const router = express.Router();
 const { Op } = require('sequelize');
 const { requireAuth } = require('../middleware/auth');
-const { getRoleTitle } = require('../utils/roles');
+const { getRoleTitle, studentRoleWhere, ROLES } = require('../utils/roles');
 const {
   User,
   Notification,
   Message,
   IndividualPlan,
   PlanItem,
-  Supervision,
   AcademicDocument
 } = require('../models');
+const { supervisedPostgraduateIds } = require('../utils/supervision');
 const { syncAndCountAllOverduePlanItems } = require('../utils/planItemOverdue');
 
 // GET /api/profile/me - Получить текущего пользователя
@@ -20,7 +20,7 @@ router.get('/me', requireAuth, async (req, res) => {
     const user = req.user;
     const userData = user.toSafeJSON();
     userData.roleTitle = getRoleTitle(user.role);
-    
+
     res.json(userData);
   } catch (error) {
     console.error('Ошибка получения профиля:', error);
@@ -36,26 +36,20 @@ router.get('/home-summary', requireAuth, async (req, res) => {
       where: { userId: u.id, readAt: null }
     });
     const unreadMessages = await Message.count({
-      where: { recipientId: u.id, isRead: false }
+      where: {
+        recipientId: u.id,
+        isRead: false,
+        messageType: { [Op.ne]: 'supervisor_feedback' }
+      }
     });
 
-    if (u.role === 'admin') {
-      const [usersTotal, postgraduates, professors] = await Promise.all([
+    if (u.role === ROLES.ADMIN) {
+      const [usersTotal, students, supervisors] = await Promise.all([
         User.count(),
-        User.count({ where: { role: 'postgraduate' } }),
-        User.count({ where: { role: 'professor' } })
+        User.count({ where: studentRoleWhere() }),
+        User.count({ where: { role: { [Op.in]: [ROLES.SUPERVISOR, 'professor'] } } })
       ]);
-      return res.json({
-        role: u.role,
-        unreadNotifications,
-        unreadMessages,
-        metrics: { usersTotal, postgraduates, professors }
-      });
-    }
-
-    if (u.role === 'program_admin') {
-      const [postgraduates, overduePlanItems, plansPending, docsReview] = await Promise.all([
-        User.count({ where: { role: 'postgraduate' } }),
+      const [overduePlanItems, plansPending, docsReview] = await Promise.all([
         syncAndCountAllOverduePlanItems(PlanItem, IndividualPlan),
         IndividualPlan.count({ where: { status: 'submitted' } }),
         AcademicDocument.count({ where: { status: 'on_review' } })
@@ -65,7 +59,11 @@ router.get('/home-summary', requireAuth, async (req, res) => {
         unreadNotifications,
         unreadMessages,
         metrics: {
-          postgraduates,
+          usersTotal,
+          students,
+          supervisors,
+          professors: supervisors,
+          postgraduates: students,
           overduePlanItems,
           plansPendingApproval: plansPending,
           documentsOnReview: docsReview
@@ -73,13 +71,8 @@ router.get('/home-summary', requireAuth, async (req, res) => {
       });
     }
 
-    if (u.role === 'professor') {
-      const sup = await Supervision.findAll({
-        where: { supervisorId: u.id, isActive: true },
-        attributes: ['postgraduateId'],
-        raw: true
-      });
-      const pgIds = [...new Set(sup.map((r) => r.postgraduateId))];
+    if (u.role === ROLES.SUPERVISOR) {
+      const pgIds = await supervisedPostgraduateIds(u.id);
       const plansPending =
         pgIds.length > 0
           ? await IndividualPlan.count({
@@ -115,13 +108,11 @@ router.put('/me', requireAuth, async (req, res) => {
     const user = req.user;
     const { fullName, groupName, email, phone, oldPassword, newPassword } = req.body;
 
-    // Обновляем основные данные
     if (fullName !== undefined) user.fullName = fullName;
     if (groupName !== undefined) user.groupName = groupName;
     if (email !== undefined) user.email = email;
     if (phone !== undefined) user.phone = phone;
 
-    // Обновляем пароль, если указан
     if (newPassword) {
       if (!oldPassword) {
         return res.status(400).json({ error: 'Требуется текущий пароль для смены' });
@@ -129,11 +120,10 @@ router.put('/me', requireAuth, async (req, res) => {
 
       const isValidPassword = await user.checkPassword(oldPassword);
       if (!isValidPassword) {
-        // 400, не 401: иначе клиент воспринимает как «сессия недействительна» и разлогинивает
         return res.status(400).json({ error: 'Текущий пароль введён неверно' });
       }
 
-      user.password = newPassword; // Хук в модели автоматически захеширует
+      user.password = newPassword;
     }
 
     await user.save();
@@ -149,4 +139,3 @@ router.put('/me', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
-

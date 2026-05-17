@@ -1,5 +1,6 @@
 const { User } = require('../models');
 const { verifyToken } = require('../config/jwt');
+const { expandRoles } = require('../utils/roles');
 
 function extractBearerToken(req) {
   const h = req.headers.authorization;
@@ -63,7 +64,8 @@ function requireRole(...roles) {
     if (!req.user) {
       return res.status(401).json({ error: 'Требуется авторизация' });
     }
-    if (!roles.includes(req.user.role)) {
+    const allowed = expandRoles(roles);
+    if (!allowed.includes(req.user.role)) {
       return res.status(403).json({ error: 'Недостаточно прав для этой операции' });
     }
     next();

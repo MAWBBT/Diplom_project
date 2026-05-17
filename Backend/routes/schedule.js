@@ -4,6 +4,7 @@ const { requireAuth } = require('../middleware/auth');
 const { Schedule, User, Subject } = require('../models');
 const { Op } = require('sequelize');
 const { normName, canManageScheduleRow } = require('../utils/scheduleAccess');
+const { hasRole, ROLES } = require('../utils/roles');
 
 function normalizeDateOnly(value) {
   if (!value) return null;
@@ -32,7 +33,7 @@ router.get('/', requireAuth, async (req, res) => {
       attributes: ['id', 'name']
     }];
     
-    if (req.user.role === 'postgraduate') {
+    if (['student', 'postgraduate'].includes(req.user.role)) {
       where.userId = req.user.id;
     } else {
       include.unshift({
@@ -54,7 +55,7 @@ router.get('/', requireAuth, async (req, res) => {
     }
 
     // groupName filter requires join on User; available only for non-postgraduate requesters
-    if (groupName && req.user.role !== 'postgraduate') {
+    if (groupName && !['student', 'postgraduate'].includes(req.user.role)) {
       const gn = String(groupName).trim();
       if (gn) {
         include[0].where = { groupName: { [Op.iLike]: `%${gn}%` } };
@@ -82,7 +83,7 @@ router.get('/', requireAuth, async (req, res) => {
 // POST /api/schedule — создание записи (администратор, профессор)
 router.post('/', requireAuth, async (req, res) => {
   try {
-    if (!['admin', 'professor'].includes(req.user.role)) {
+    if (!hasRole(req.user, ROLES.ADMIN, ROLES.SUPERVISOR)) {
       return res.status(403).json({ error: 'Недостаточно прав' });
     }
 
@@ -92,7 +93,7 @@ router.post('/', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'День недели, время и предмет обязательны' });
     }
 
-    if (req.user.role === 'professor') {
+    if (hasRole(req.user, ROLES.SUPERVISOR)) {
       const me = String(req.user.fullName || '').trim();
       if (!me) {
         return res.status(400).json({ error: 'В профиле не указано ФИО преподавателя' });
@@ -124,7 +125,7 @@ router.post('/', requireAuth, async (req, res) => {
 // PUT /api/schedule/:id — редактирование занятия (admin, professor)
 router.put('/:id', requireAuth, async (req, res) => {
   try {
-    if (!['admin', 'professor'].includes(req.user.role)) {
+    if (!hasRole(req.user, ROLES.ADMIN, ROLES.SUPERVISOR)) {
       return res.status(403).json({ error: 'Недостаточно прав' });
     }
 
@@ -143,7 +144,7 @@ router.put('/:id', requireAuth, async (req, res) => {
     if (time !== undefined) row.time = time;
     if (subjectId !== undefined) row.subjectId = subjectId;
     if (teacher !== undefined) {
-      if (req.user.role === 'professor') {
+      if (hasRole(req.user, ROLES.SUPERVISOR)) {
         const me = String(req.user.fullName || '').trim();
         if (normName(teacher) !== normName(me)) {
           return res.status(403).json({ error: 'Нельзя переназначить занятие другому преподавателю' });
@@ -170,7 +171,7 @@ router.put('/:id', requireAuth, async (req, res) => {
 // DELETE /api/schedule/:id — удаление занятия (admin, professor)
 router.delete('/:id', requireAuth, async (req, res) => {
   try {
-    if (!['admin', 'professor'].includes(req.user.role)) {
+    if (!hasRole(req.user, ROLES.ADMIN, ROLES.SUPERVISOR)) {
       return res.status(403).json({ error: 'Недостаточно прав' });
     }
 

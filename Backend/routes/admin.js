@@ -1,9 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const { requireAuth } = require('../middleware/auth');
-const { User, Schedule, Grade, Message, Subject, Supervision, AuditLog } = require('../models');
+const { User, Schedule, Grade, Message, Subject, PostgraduateProfile } = require('../models');
 
-const ALLOWED_ROLES = ['admin', 'postgraduate', 'professor', 'program_admin'];
+const { ALL_ROLES } = require('../utils/roles');
+const ALLOWED_ROLES = ALL_ROLES;
 
 const requireAdmin = (req, res, next) => {
   if (req.user.role !== 'admin') {
@@ -307,44 +308,45 @@ router.post('/supervisions', requireAuth, requireAdmin, async (req, res) => {
   }
   const pg = await User.findByPk(postgraduateId);
   const sup = await User.findByPk(supervisorId);
-  if (!pg || pg.role !== 'postgraduate') {
+  if (!pg || !['student', 'postgraduate'].includes(pg.role)) {
     return res.status(400).json({ error: 'Некорректный аспирант' });
   }
-  if (!sup || sup.role !== 'professor') {
-    return res.status(400).json({ error: 'Некорректный профессор' });
+  if (!sup || sup.role !== 'supervisor') {
+    return res.status(400).json({ error: 'Некорректный научный руководитель' });
   }
+  const profile = await PostgraduateProfile.findOne({ where: { userId: postgraduateId } });
+  if (!profile) return res.status(404).json({ error: 'Профиль аспиранта не найден' });
   const kind = supervisionKind === 'co_supervisor' ? 'co_supervisor' : 'primary';
-  const row = await Supervision.create({
-    postgraduateId,
-    supervisorId,
-    supervisionKind: kind,
-    startedAt: startedAt || new Date().toISOString().slice(0, 10),
-    isActive: true
-  });
-  res.status(201).json(row);
+  if (kind === 'co_supervisor') {
+    profile.coSupervisorId = supervisorId;
+  } else {
+    profile.supervisorId = supervisorId;
+    profile.supervisionStartedAt = startedAt || new Date().toISOString().slice(0, 10);
+  }
+  await profile.save();
+  const { supervisionRow } = require('../utils/supervisionProfile');
+  res.status(201).json(supervisionRow(profile, kind));
 });
 
 router.patch('/supervisions/:id', requireAuth, requireAdmin, async (req, res) => {
-  const row = await Supervision.findByPk(req.params.id);
-  if (!row) return res.status(404).json({ error: 'Не найдено' });
-  const { isActive, endedAt } = req.body;
-  if (isActive !== undefined) row.isActive = !!isActive;
-  if (endedAt !== undefined) row.endedAt = endedAt;
-  await row.save();
-  res.json(row);
+  const profileId = Math.floor(parseInt(req.params.id, 10) / 10);
+  const profile = await PostgraduateProfile.findByPk(profileId);
+  if (!profile) return res.status(404).json({ error: 'Не найдено' });
+  const { isActive, supervisorId, coSupervisorId } = req.body;
+  if (isActive === false) {
+    profile.supervisorId = null;
+    profile.coSupervisorId = null;
+  }
+  if (supervisorId !== undefined) profile.supervisorId = supervisorId || null;
+  if (coSupervisorId !== undefined) profile.coSupervisorId = coSupervisorId || null;
+  await profile.save();
+  const { supervisionRow } = require('../utils/supervisionProfile');
+  res.json(supervisionRow(profile, 'primary') || supervisionRow(profile, 'co_supervisor'));
 });
 
 // GET /api/admin/audit-log — журнал действий (аудит)
-router.get('/audit-log', requireAuth, requireAdmin, async (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit, 10) || 80, 200);
-  const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
-  const rows = await AuditLog.findAll({
-    order: [['createdAt', 'DESC']],
-    limit,
-    offset,
-    include: [{ model: User, as: 'actor', attributes: ['id', 'login', 'fullName', 'role'] }]
-  });
-  res.json(rows);
+router.get('/audit-log', requireAuth, requireAdmin, async (_req, res) => {
+  res.json([]);
 });
 
 module.exports = router;

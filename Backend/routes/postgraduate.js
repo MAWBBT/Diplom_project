@@ -11,9 +11,7 @@ const { normalizeUploadFilename, sendFileDownload } = require('../utils/uploadFi
 const {
   User,
   PostgraduateProfile,
-  Supervision,
   DissertationTopic,
-  DissertationTopicHistory,
   IndividualPlan,
   PlanItem,
   PlanItemFile,
@@ -25,7 +23,8 @@ const {
   AttestationFile
 } = require('../models');
 
-const pgOnly = [requireAuth, requireRole('postgraduate')];
+const { supervisionsForPostgraduate } = require('../utils/supervision');
+const pgOnly = [requireAuth, requireRole('student')];
 
 const uploadRoot = path.join(__dirname, '../uploads/documents');
 if (!fs.existsSync(uploadRoot)) {
@@ -152,10 +151,7 @@ async function loadDashboardPayload(userId) {
         { model: DocumentFile, as: 'files' }
       ]
     }),
-    Supervision.findAll({
-      where: { postgraduateId: userId, isActive: true },
-      include: [{ model: User, as: 'supervisor', attributes: ['id', 'fullName', 'login', 'email'] }]
-    })
+    supervisionsForPostgraduate(userId)
   ]);
 
   return {
@@ -636,13 +632,6 @@ router.put('/topics/:id', ...pgOnly, async (req, res) => {
     const { title, status } = req.body;
     if (title !== undefined && String(title).trim() !== t.title) {
       if (t.status === 'approved') {
-        await DissertationTopicHistory.create({
-          userId: req.user.id,
-          title: t.title,
-          status: t.status,
-          note: 'Предыдущая утверждённая тема при смене формулировки',
-          changedById: req.user.id
-        });
         t.title = String(title).trim();
         t.status = 'draft';
         t.rejectReason = null;
@@ -725,15 +714,8 @@ router.patch('/plans/:planId', ...pgOnly, async (req, res) => {
   
 });
 
-router.get('/topic-history', ...pgOnly, async (req, res) => {
-  
-    const rows = await DissertationTopicHistory.findAll({
-      where: { userId: req.user.id },
-      order: [['createdAt', 'DESC']],
-      include: [{ model: User, as: 'changedBy', attributes: ['id', 'fullName'] }]
-    });
-    res.json(rows);
-  
+router.get('/topic-history', ...pgOnly, async (_req, res) => {
+  res.json([]);
 });
 
 router.get('/plan', ...pgOnly, async (req, res) => {

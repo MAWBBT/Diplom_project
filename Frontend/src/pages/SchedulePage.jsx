@@ -5,6 +5,7 @@ import SectionCard from "../components/SectionCard";
 import { useAuthStore } from "../store/authStore";
 import WeekSchedule, { mondayOfCalendarWeek } from "../components/WeekSchedule";
 import { canManageScheduleRow } from "../utils/scheduleAccess";
+import { ROLES, roleMatches } from "../utils/roles";
 
 const fieldLabels = {
   dayOfWeek: "День недели (1-7)",
@@ -46,8 +47,8 @@ export default function SchedulePage() {
   const [editing, setEditing] = useState(null); // schedule row being edited
   const editPanelRef = useRef(null);
 
-  const canCreate = ["admin", "professor"].includes(user?.role);
-  const isProfessor = user?.role === "professor";
+  const canCreate = roleMatches(user?.role, [ROLES.ADMIN, ROLES.SUPERVISOR]);
+  const isProfessor = roleMatches(user?.role, [ROLES.SUPERVISOR]);
 
   const canManageRow = (row) => canManageScheduleRow(user, row);
 
@@ -77,7 +78,9 @@ export default function SchedulePage() {
       if (filters.subjectId) params.set("subjectId", filters.subjectId);
       if (filters.dateFrom) params.set("dateFrom", filters.dateFrom);
       if (filters.dateTo) params.set("dateTo", filters.dateTo);
-      if (filters.groupName.trim() && user?.role !== "postgraduate") params.set("groupName", filters.groupName.trim());
+      if (filters.groupName.trim() && !roleMatches(user?.role, [ROLES.STUDENT])) {
+        params.set("groupName", filters.groupName.trim());
+      }
 
       const url = params.toString() ? `/schedule?${params.toString()}` : "/schedule";
       setRows((await api.get(url)).data);
@@ -242,7 +245,7 @@ export default function SchedulePage() {
           </button>
         </div>
 
-        {user?.role !== "postgraduate" ? (
+        {!roleMatches(user?.role, [ROLES.STUDENT]) ? (
           <div className="grid md:grid-cols-5 gap-3 items-end">
             <input
               className="md:col-span-2 w-full rounded-xl border border-slate-600/60 bg-slate-950/60 text-slate-100 px-3 py-2.5 text-sm placeholder:text-slate-400 focus:outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-400/20 shadow-inner"

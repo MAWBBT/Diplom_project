@@ -11,6 +11,7 @@ const { notifyUser } = require('../utils/notify');
 const { writeAudit } = require('../utils/audit');
 const { normalizeUploadFilename, sendFileDownload } = require('../utils/uploadFilename');
 const { Attestation, AttestationFile, User } = require('../models');
+const { studentRoleWhere } = require('../utils/roles');
 
 function normalizeDateOnly(value) {
   if (!value) return null;
@@ -23,15 +24,17 @@ function normalizeDateOnly(value) {
 
 async function assertCanManagePostgraduate(req, postgraduateId) {
   if (req.user.role === 'admin') return true;
-  if (req.user.role !== 'professor') return false;
+  if (req.user.role !== 'supervisor') return false;
   return userSupervisesPostgraduate(req.user.id, postgraduateId);
 }
 
 function canAccessAttestation(req, attestation) {
   if (!req.user || !attestation) return false;
   if (req.user.role === 'admin') return true;
-  if (req.user.role === 'postgraduate') return attestation.userId === req.user.id;
-  if (req.user.role === 'professor') return true; // checked via assertCanManagePostgraduate when needed
+  if (['student', 'postgraduate'].includes(req.user.role)) {
+    return attestation.userId === req.user.id;
+  }
+  if (req.user.role === 'supervisor') return true;
   return false;
 }
 
@@ -69,7 +72,7 @@ const upload = multer({
 });
 
 // GET /api/attestations/me - список аттестаций текущего аспиранта
-router.get('/me', requireAuth, requireRole('postgraduate'), async (req, res) => {
+router.get('/me', requireAuth, requireRole('student'), async (req, res) => {
   const rows = await Attestation.findAll({
     where: { userId: req.user.id },
     include: [{ model: AttestationFile, as: 'files' }],
@@ -79,23 +82,18 @@ router.get('/me', requireAuth, requireRole('postgraduate'), async (req, res) => 
 });
 
 // GET /api/attestations/postgraduates - список доступных аспирантов (для профессора/админа)
-router.get('/postgraduates', requireAuth, requireRole('professor', 'admin'), async (req, res) => {
+router.get('/postgraduates', requireAuth, requireRole('supervisor', 'admin'), async (req, res) => {
   if (req.user.role === 'admin') {
     const list = await User.findAll({
-      where: { role: 'postgraduate' },
+      where: studentRoleWhere(),
       attributes: ['id', 'fullName', 'login', 'groupName', 'email'],
       order: [['groupName', 'ASC'], ['fullName', 'ASC']]
     });
     return res.json(list.map((u) => u.toSafeJSON()));
   }
 
-  // professor: показываем только тех, кем руководит (через таблицу supervision)
-  const { Supervision } = require('../models');
-  const links = await Supervision.findAll({
-    where: { supervisorId: req.user.id, isActive: true },
-    attributes: ['postgraduateId']
-  });
-  const postgraduateIds = links.map((l) => l.postgraduateId).filter(Boolean);
+  const { supervisedPostgraduateIds } = require('../utils/supervision');
+  const postgraduateIds = await supervisedPostgraduateIds(req.user.id);
   if (!postgraduateIds.length) return res.json([]);
 
   const list = await User.findAll({
@@ -107,7 +105,7 @@ router.get('/postgraduates', requireAuth, requireRole('professor', 'admin'), asy
 });
 
 // GET /api/attestations/postgraduate/:userId - список аттестаций аспиранта
-router.get('/postgraduate/:userId', requireAuth, requireRole('professor', 'admin'), async (req, res) => {
+router.get('/postgraduate/:userId', requireAuth, requireRole('supervisor', 'admin'), async (req, res) => {
   const postgraduateId = parseInt(req.params.userId, 10);
   if (!postgraduateId) return res.status(400).json({ error: 'Некорректный userId' });
 
@@ -123,7 +121,7 @@ router.get('/postgraduate/:userId', requireAuth, requireRole('professor', 'admin
 });
 
 // POST /api/attestations/postgraduate/:userId - создать аттестацию аспиранта
-router.post('/postgraduate/:userId', requireAuth, requireRole('professor', 'admin'), async (req, res) => {
+router.post('/postgraduate/:userId', requireAuth, requireRole('supervisor', 'admin'), async (req, res) => {
   const postgraduateId = parseInt(req.params.userId, 10);
   if (!postgraduateId) return res.status(400).json({ error: 'Некорректный userId' });
 
@@ -155,7 +153,7 @@ router.post('/postgraduate/:userId', requireAuth, requireRole('professor', 'admi
 });
 
 // POST /api/attestations/:id/files — загрузить отчёт к аттестации (professor/admin)
-router.post('/:id/files', requireAuth, requireRole('professor', 'admin'), upload.single('file'), async (req, res) => {
+router.post('/:id/files', requireAuth, requireRole('supervisor', 'admin'), upload.single('file'), async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
     if (!id) return res.status(400).json({ error: 'Некорректный id' });
@@ -193,17 +191,14 @@ router.get('/:id/files/:fileId/download', requireAuth, async (req, res) => {
     const att = await Attestation.findByPk(id);
     if (!att) return res.status(404).json({ error: 'Аттестация не найдена' });
 
-    if (req.user.role === 'postgraduate' && att.userId !== req.user.id) {
+    if (!canAccessAttestation(req, att)) return res.status(403).json({ error: 'Нет доступа' });
+    if (['student', 'postgraduate'].includes(req.user.role) && att.userId !== req.user.id) {
       return res.status(403).json({ error: 'Нет доступа' });
     }
-    if (req.user.role === 'professor') {
+    if (req.user.role === 'supervisor') {
       const ok = await assertCanManagePostgraduate(req, att.userId);
       if (!ok) return res.status(403).json({ error: 'Нет доступа' });
     }
-    if (req.user.role !== 'admin' && req.user.role !== 'postgraduate' && req.user.role !== 'professor') {
-      return res.status(403).json({ error: 'Нет доступа' });
-    }
-    if (!canAccessAttestation(req, att)) return res.status(403).json({ error: 'Нет доступа' });
 
     const f = await AttestationFile.findOne({ where: { id: fileId, attestationId: att.id } });
     if (!f) return res.status(404).json({ error: 'Файл не найден' });
@@ -216,7 +211,7 @@ router.get('/:id/files/:fileId/download', requireAuth, async (req, res) => {
 });
 
 // PUT /api/attestations/:id - обновить аттестацию
-router.put('/:id', requireAuth, requireRole('professor', 'admin'), async (req, res) => {
+router.put('/:id', requireAuth, requireRole('supervisor', 'admin'), async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!id) return res.status(400).json({ error: 'Некорректный id' });
 
@@ -250,7 +245,7 @@ router.put('/:id', requireAuth, requireRole('professor', 'admin'), async (req, r
 });
 
 // DELETE /api/attestations/:id - удалить аттестацию
-router.delete('/:id', requireAuth, requireRole('professor', 'admin'), async (req, res) => {
+router.delete('/:id', requireAuth, requireRole('supervisor', 'admin'), async (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (!id) return res.status(400).json({ error: 'Некорректный id' });
 

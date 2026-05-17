@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { Op } = require('sequelize');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { hasRole, ROLES } = require('../utils/roles');
 const { userSupervisesPostgraduate } = require('../utils/supervision');
 const { AttendanceSession, AttendanceRecord, User, Subject, Schedule } = require('../models');
 const { scheduleBelongsToProfessor } = require('../utils/professorSubjects');
@@ -20,7 +21,7 @@ const { normName } = require('../utils/scheduleAccess');
 function canManageSession(user, session) {
   if (!user || !session) return false;
   if (user.role === 'admin') return true;
-  if (user.role === 'professor') return normName(session.teacher) === normName(user.fullName);
+  if (hasRole(user, ROLES.SUPERVISOR)) return normName(session.teacher) === normName(user.fullName);
   return false;
 }
 
@@ -102,7 +103,7 @@ async function openSessionFromSchedule(scheduleId, user) {
 }
 
 // POST /api/attendance/sessions - создать занятие для отметки посещаемости (admin, professor)
-router.post('/sessions', requireAuth, requireRole('admin', 'professor'), async (req, res) => {
+router.post('/sessions', requireAuth, requireRole('admin', 'supervisor'), async (req, res) => {
   try {
     const { heldOn, groupName, subjectId, time, teacher, auditorium } = req.body || {};
     const date = normalizeDateOnly(heldOn);
@@ -111,7 +112,7 @@ router.post('/sessions', requireAuth, requireRole('admin', 'professor'), async (
     if (!subjectId) return res.status(400).json({ error: 'Укажите subjectId' });
 
     const resolvedTeacher =
-      req.user.role === 'professor'
+      hasRole(req.user, ROLES.SUPERVISOR)
         ? req.user.fullName
         : (teacher && String(teacher).trim()) || req.user.fullName;
 
@@ -133,7 +134,7 @@ router.post('/sessions', requireAuth, requireRole('admin', 'professor'), async (
 });
 
 // GET /api/attendance/lessons — занятия из расписания (+ уже созданные сессии посещаемости)
-router.get('/lessons', requireAuth, requireRole('admin', 'professor'), async (req, res) => {
+router.get('/lessons', requireAuth, requireRole('admin', 'supervisor'), async (req, res) => {
   try {
     const { dateFrom, dateTo, groupName, subjectId, teacher } = req.query || {};
     const from = normalizeDateOnly(dateFrom);
@@ -151,7 +152,7 @@ router.get('/lessons', requireAuth, requireRole('admin', 'professor'), async (re
     });
 
     let slots = schedulesRaw.filter((s) => {
-      if (req.user.role === 'professor' && !scheduleBelongsToProfessor(s, req.user)) return false;
+      if (hasRole(req.user, ROLES.SUPERVISOR) && !scheduleBelongsToProfessor(s, req.user)) return false;
       if (groupFilter && (s.user?.groupName || '').trim() !== groupFilter) return false;
       if (subjectFilter && s.subjectId !== subjectFilter) return false;
       if (teacherFilter && !normName(s.teacher).includes(normName(teacherFilter))) return false;
@@ -172,7 +173,7 @@ router.get('/lessons', requireAuth, requireRole('admin', 'professor'), async (re
     }
     if (groupFilter) sessionWhere.groupName = groupFilter;
     if (subjectFilter) sessionWhere.subjectId = subjectFilter;
-    if (req.user.role === 'professor') {
+    if (hasRole(req.user, ROLES.SUPERVISOR)) {
       sessionWhere.teacher = req.user.fullName;
     } else if (teacherFilter) {
       sessionWhere.teacher = { [Op.iLike]: `%${teacherFilter}%` };
@@ -233,7 +234,7 @@ router.get('/lessons', requireAuth, requireRole('admin', 'professor'), async (re
 });
 
 // POST /api/attendance/sessions/from-schedule — открыть занятие по строке расписания
-router.post('/sessions/from-schedule', requireAuth, requireRole('admin', 'professor'), async (req, res) => {
+router.post('/sessions/from-schedule', requireAuth, requireRole('admin', 'supervisor'), async (req, res) => {
   try {
     const scheduleId = parseInt(req.body?.scheduleId, 10);
     if (!scheduleId) return res.status(400).json({ error: 'Укажите scheduleId' });
@@ -247,7 +248,7 @@ router.post('/sessions/from-schedule', requireAuth, requireRole('admin', 'profes
 });
 
 // GET /api/attendance/sessions - список занятий (admin, professor)
-router.get('/sessions', requireAuth, requireRole('admin', 'professor'), async (req, res) => {
+router.get('/sessions', requireAuth, requireRole('admin', 'supervisor'), async (req, res) => {
   try {
     const { dateFrom, dateTo, groupName, subjectId, teacher } = req.query || {};
     const where = {};
@@ -263,7 +264,7 @@ router.get('/sessions', requireAuth, requireRole('admin', 'professor'), async (r
     if (subjectId) where.subjectId = parseInt(subjectId, 10);
     if (teacher && String(teacher).trim()) where.teacher = { [Op.iLike]: `%${String(teacher).trim()}%` };
 
-    if (req.user.role === 'professor') {
+    if (hasRole(req.user, ROLES.SUPERVISOR)) {
       where.teacher = req.user.fullName;
     }
 
@@ -280,7 +281,7 @@ router.get('/sessions', requireAuth, requireRole('admin', 'professor'), async (r
 });
 
 // GET /api/attendance/sessions/:id/roster - список аспирантов группы + текущие отметки
-router.get('/sessions/:id/roster', requireAuth, requireRole('admin', 'professor'), async (req, res) => {
+router.get('/sessions/:id/roster', requireAuth, requireRole('admin', 'supervisor'), async (req, res) => {
   try {
     const session = await AttendanceSession.findByPk(req.params.id, {
       include: [{ model: Subject, as: 'subjectRef', attributes: ['id', 'name'] }]
@@ -289,7 +290,7 @@ router.get('/sessions/:id/roster', requireAuth, requireRole('admin', 'professor'
     if (!canManageSession(req.user, session)) return res.status(403).json({ error: 'Нет доступа' });
 
     const postgraduates = await User.findAll({
-      where: { role: 'postgraduate', groupName: session.groupName, isActive: true },
+      where: { role: { [Op.in]: ['student', 'postgraduate'] }, groupName: session.groupName, isActive: true },
       attributes: ['id', 'fullName', 'login', 'groupName'],
       order: [['fullName', 'ASC']]
     });
@@ -319,7 +320,7 @@ router.get('/sessions/:id/roster', requireAuth, requireRole('admin', 'professor'
 
 // PUT /api/attendance/sessions/:id/mark - пакетная отметка посещаемости по группе
 // body: { marks: [{ postgraduateId, status, note }] }
-router.put('/sessions/:id/mark', requireAuth, requireRole('admin', 'professor'), async (req, res) => {
+router.put('/sessions/:id/mark', requireAuth, requireRole('admin', 'supervisor'), async (req, res) => {
   try {
     const session = await AttendanceSession.findByPk(req.params.id);
     if (!session) return res.status(404).json({ error: 'Занятие не найдено' });
@@ -360,7 +361,7 @@ router.put('/sessions/:id/mark', requireAuth, requireRole('admin', 'professor'),
 });
 
 // GET /api/attendance/my - история и статистика для аспиранта
-router.get('/my', requireAuth, requireRole('postgraduate'), async (req, res) => {
+router.get('/my', requireAuth, requireRole('student'), async (req, res) => {
   try {
     const { dateFrom, dateTo } = req.query || {};
     const whereSession = {};
@@ -394,7 +395,7 @@ router.get('/my', requireAuth, requireRole('postgraduate'), async (req, res) => 
 });
 
 // GET /api/attendance/supervised/:postgraduateId - статистика посещаемости аспиранта для руководителя
-router.get('/supervised/:postgraduateId', requireAuth, requireRole('professor'), async (req, res) => {
+router.get('/supervised/:postgraduateId', requireAuth, requireRole('supervisor'), async (req, res) => {
   try {
     const postgraduateId = parseInt(req.params.postgraduateId, 10);
     if (!postgraduateId) return res.status(400).json({ error: 'Некорректный postgraduateId' });

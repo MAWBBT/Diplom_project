@@ -4,10 +4,11 @@ const { requireAuth } = require('../middleware/auth');
 const { Grade, Subject, User } = require('../models');
 const { Op } = require('sequelize');
 const { getProfessorSubjectIds, professorTeachesSubject } = require('../utils/professorSubjects');
+const { hasRole, ROLES } = require('../utils/roles');
 
 router.get('/', requireAuth, async (req, res) => {
   try {
-    if (req.user.role === 'professor') {
+    if (hasRole(req.user, ROLES.SUPERVISOR)) {
       const subjectIds = await getProfessorSubjectIds(req.user);
       if (!subjectIds.length) {
         return res.json([]);
@@ -49,7 +50,7 @@ router.get('/', requireAuth, async (req, res) => {
 
 router.post('/', requireAuth, async (req, res) => {
   try {
-    if (!['admin', 'professor'].includes(req.user.role)) {
+    if (!hasRole(req.user, ROLES.ADMIN, ROLES.SUPERVISOR)) {
       return res.status(403).json({ error: 'Недостаточно прав' });
     }
     const { userId, subjectId, controlType, grade, comment } = req.body;
@@ -58,7 +59,7 @@ router.post('/', requireAuth, async (req, res) => {
     }
 
     const sid = parseInt(subjectId, 10);
-    if (req.user.role === 'professor') {
+    if (hasRole(req.user, ROLES.SUPERVISOR)) {
       const teaches = await professorTeachesSubject(req.user, sid);
       if (!teaches) {
         return res.status(403).json({

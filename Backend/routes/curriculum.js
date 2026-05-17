@@ -18,7 +18,7 @@ function normalizeYear(value) {
 
 async function resolveProgramIdForUser(user) {
   if (!user) return null;
-  if (user.role === 'postgraduate') {
+  if (['student', 'postgraduate'].includes(user.role)) {
     const p = await PostgraduateProfile.findOne({ where: { userId: user.id } });
     return p?.programId || null;
   }

@@ -4,12 +4,7 @@ import api, { getErrorMessage } from "../api/client";
 import SectionCard from "../components/SectionCard";
 import { useAuthStore } from "../store/authStore";
 
-const roleNames = {
-  postgraduate: "Аспирант",
-  professor: "Профессор",
-  admin: "Администратор",
-  program_admin: "Администратор программы",
-};
+import { getRoleTitle } from "../utils/roles";
 
 const labels = {
   fullName: "ФИО",
@@ -81,7 +76,7 @@ export default function ProfilePage() {
       <div className="mb-6 flex items-center">
         <span className="text-slate-400 mr-3">Ваша роль:</span>
         <span className="inline-flex items-center px-3 py-1 text-xs font-medium rounded-full bg-sky-500/10 text-sky-300 border border-sky-500/20 shadow-sm">
-          {roleNames[user?.role] || user?.role}
+          {getRoleTitle(user?.role) || user?.roleTitle || user?.role}
         </span>
       </div>
       <div className="grid md:grid-cols-2 gap-4">

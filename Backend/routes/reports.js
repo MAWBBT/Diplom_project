@@ -4,10 +4,8 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { Op } = require('sequelize');
 const { requireAuth, requireRole } = require('../middleware/auth');
-const { labelEnum } = require('../utils/reportLabels');
 const { addReportSheet, createWorkbook } = require('../utils/reportSheet');
 const {
-  ReportFile,
   User,
   Grade,
   Subject,
@@ -24,6 +22,10 @@ const adminOnly = [requireAuth, requireRole('admin')];
 const reportsRoot = path.join(__dirname, '../uploads/reports');
 if (!fs.existsSync(reportsRoot)) {
   fs.mkdirSync(reportsRoot, { recursive: true });
+}
+
+function metaPath(storedName) {
+  return path.join(reportsRoot, `${storedName}.json`);
 }
 
 function normalizeDateOnly(value) {
@@ -56,6 +58,35 @@ function heldOnRange(dateFrom, dateTo) {
   if (dateFrom) where[Op.gte] = dateFrom;
   if (dateTo) where[Op.lte] = dateTo;
   return { heldOn: where };
+}
+
+function listReportsFromDisk() {
+  if (!fs.existsSync(reportsRoot)) return [];
+  const files = fs
+    .readdirSync(reportsRoot)
+    .filter((f) => f.endsWith('.xlsx'))
+    .map((storedName) => {
+      const fp = path.join(reportsRoot, storedName);
+      const stat = fs.statSync(fp);
+      let meta = {};
+      const mp = metaPath(storedName);
+      if (fs.existsSync(mp)) {
+        try {
+          meta = JSON.parse(fs.readFileSync(mp, 'utf8'));
+        } catch {
+          meta = {};
+        }
+      }
+      return {
+        id: storedName,
+        reportType: meta.reportType || 'unknown',
+        originalName: meta.originalName || storedName,
+        params: meta.params || null,
+        createdAt: stat.mtime,
+        generatedBy: meta.generatedBy || null
+      };
+    });
+  return files.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 50);
 }
 
 async function buildGradesWorkbook(params) {
@@ -124,22 +155,18 @@ async function buildAttendanceWorkbook(params) {
     'Сводная посещаемость',
     params,
     [
-      { header: 'Дата занятия', key: 'heldOn' },
+      { header: 'Аспирант', key: 'postgraduate' },
       { header: 'Группа', key: 'groupName' },
       { header: 'Дисциплина', key: 'subject' },
-      { header: 'Преподаватель', key: 'teacher' },
-      { header: 'Аспирант', key: 'postgraduate' },
-      { header: 'Статус', key: 'status' },
-      { header: 'Комментарий', key: 'note' }
+      { header: 'Дата занятия', key: 'heldOn' },
+      { header: 'Статус', key: 'status' }
     ],
     records.map((r) => ({
-      heldOn: r.session?.heldOn || '',
-      groupName: r.session?.groupName || '',
-      subject: r.session?.subjectRef?.name || '',
-      teacher: r.session?.teacher || '',
       postgraduate: r.postgraduate?.fullName || '',
-      status: labelEnum(r.status),
-      note: r.note || ''
+      groupName: r.postgraduate?.groupName || '',
+      subject: r.session?.subjectRef?.name || '',
+      heldOn: r.session?.heldOn || '',
+      status: r.status || ''
     }))
   );
 
@@ -149,76 +176,47 @@ async function buildAttendanceWorkbook(params) {
 async function buildPlansWorkbook(params) {
   const { academicYear } = params;
   const wb = createWorkbook();
-
-  const planWhere = {};
-  if (academicYear) planWhere.academicYear = String(academicYear).trim();
+  const planWhere = academicYear ? { academicYear } : {};
 
   const plans = await IndividualPlan.findAll({
     where: planWhere,
-    include: [{ model: User, as: 'owner', attributes: ['id', 'fullName', 'groupName'] }],
-    order: [['updatedAt', 'DESC']],
-    limit: 50000
-  });
-
-  addReportSheet(
-    wb,
-    'Состояние планов',
-    params,
-    [
-      { header: 'Аспирант', key: 'postgraduate' },
-      { header: 'Группа', key: 'groupName' },
-      { header: 'Учебный год', key: 'academicYear' },
-      { header: 'Статус плана', key: 'status' },
-      { header: 'Обновлено', key: 'updatedAt' }
-    ],
-    plans.map((p) => ({
-      postgraduate: p.owner?.fullName || '',
-      groupName: p.owner?.groupName || '',
-      academicYear: p.academicYear,
-      status: labelEnum(p.status),
-      updatedAt: p.updatedAt ? new Date(p.updatedAt).toLocaleString('ru-RU') : ''
-    }))
-  );
-
-  const items = await PlanItem.findAll({
     include: [
-      {
-        model: IndividualPlan,
-        as: 'plan',
-        where: planWhere,
-        required: true,
-        include: [{ model: User, as: 'owner', attributes: ['id', 'fullName', 'groupName'] }]
-      }
+      { model: User, as: 'owner', attributes: ['id', 'fullName', 'groupName'] },
+      { model: PlanItem, as: 'items' }
     ],
-    order: [
-      [{ model: IndividualPlan, as: 'plan' }, 'academicYear', 'DESC'],
-      ['orderIdx', 'ASC']
-    ],
-    limit: 50000
+    order: [['academicYear', 'DESC']],
+    limit: 5000
   });
+
+  const rows = [];
+  for (const p of plans) {
+    for (const it of p.items || []) {
+      rows.push({
+        postgraduate: p.owner?.fullName || '',
+        groupName: p.owner?.groupName || '',
+        academicYear: p.academicYear,
+        planStatus: p.status,
+        itemTitle: it.title,
+        itemStatus: it.status,
+        dueDate: it.dueDate || ''
+      });
+    }
+  }
 
   addReportSheet(
     wb,
-    'Этапы индивидуальных планов',
+    'Состояние индивидуальных планов',
     params,
     [
       { header: 'Аспирант', key: 'postgraduate' },
       { header: 'Группа', key: 'groupName' },
       { header: 'Учебный год', key: 'academicYear' },
-      { header: 'Этап', key: 'title' },
-      { header: 'Статус этапа', key: 'status' },
-      { header: 'Срок', key: 'dueDate' },
-      { header: 'Выполнено', key: 'completedAt' }
+      { header: 'Статус плана', key: 'planStatus' },
+      { header: 'Этап', key: 'itemTitle' },
+      { header: 'Статус этапа', key: 'itemStatus' },
+      { header: 'Срок', key: 'dueDate' }
     ],
-    items.map((it) => ({
-      postgraduate: it.plan?.owner?.fullName || '',
-      groupName: it.plan?.owner?.groupName || '',
-      academicYear: it.plan?.academicYear || '',
-      title: it.title,
-      status: labelEnum(it.status),
-      dueDate: it.dueDate || '',
-      completedAt: it.completedAt || ''
-    }))
+    rows
   );
 
   return wb;
@@ -227,11 +225,17 @@ async function buildPlansWorkbook(params) {
 async function buildAttestationsWorkbook(params) {
   const { dateFrom, dateTo } = params;
   const wb = createWorkbook();
+  const where = {};
+  if (dateFrom || dateTo) {
+    where.attestedAt = {};
+    if (dateFrom) where.attestedAt[Op.gte] = dateFrom;
+    if (dateTo) where.attestedAt[Op.lte] = dateTo;
+  }
 
   const rows = await Attestation.findAll({
-    where: createdAtRange(dateFrom, dateTo),
+    where: Object.keys(where).length ? where : undefined,
     include: [{ model: User, as: 'owner', attributes: ['id', 'fullName', 'groupName'] }],
-    order: [['createdAt', 'DESC']],
+    order: [['attestedAt', 'DESC']],
     limit: 50000
   });
 
@@ -243,10 +247,10 @@ async function buildAttestationsWorkbook(params) {
       { header: 'Аспирант', key: 'postgraduate' },
       { header: 'Группа', key: 'groupName' },
       { header: 'Период', key: 'periodLabel' },
-      { header: 'Результат', key: 'decision' },
-      { header: 'Дата аттестации', key: 'attestedAt' },
+      { header: 'Решение', key: 'decision' },
+      { header: 'Дата', key: 'attestedAt' },
       { header: 'Примечания', key: 'notes' },
-      { header: 'Запись создана', key: 'createdAt' }
+      { header: 'Создано', key: 'createdAt' }
     ],
     rows.map((a) => ({
       postgraduate: a.owner?.fullName || '',
@@ -270,12 +274,7 @@ const REPORT_TYPES = {
 };
 
 router.get('/', ...adminOnly, async (_req, res) => {
-  const rows = await ReportFile.findAll({
-    order: [['createdAt', 'DESC']],
-    limit: 50,
-    include: [{ model: User, as: 'generatedBy', attributes: ['id', 'fullName', 'login'] }]
-  });
-  res.json(rows);
+  res.json(listReportsFromDisk());
 });
 
 router.post('/generate', ...adminOnly, async (req, res) => {
@@ -295,9 +294,7 @@ router.post('/generate', ...adminOnly, async (req, res) => {
     }
 
     const filterParams =
-      type === 'plans'
-        ? { academicYear: ay || null }
-        : { dateFrom: df, dateTo: dt };
+      type === 'plans' ? { academicYear: ay || null } : { dateFrom: df, dateTo: dt };
 
     const wb = await spec.builder(filterParams);
 
@@ -308,16 +305,32 @@ router.post('/generate', ...adminOnly, async (req, res) => {
     await wb.xlsx.writeFile(fp);
 
     const stat = fs.statSync(fp);
-    const row = await ReportFile.create({
+    const generatedBy = {
+      id: req.user.id,
+      fullName: req.user.fullName,
+      login: req.user.login
+    };
+    fs.writeFileSync(
+      metaPath(storedName),
+      JSON.stringify({
+        reportType: type,
+        originalName,
+        params: filterParams,
+        generatedBy
+      }),
+      'utf8'
+    );
+
+    res.status(201).json({
+      id: storedName,
       reportType: type,
       storedName,
       originalName,
       size: stat.size,
-      generatedById: req.user.id,
-      params: safeJson(filterParams)
+      params: safeJson(filterParams),
+      createdAt: stat.mtime,
+      generatedBy
     });
-
-    res.status(201).json(row);
   } catch (e) {
     console.error('reports/generate:', e);
     res.status(500).json({ error: 'Внутренняя ошибка сервера' });
@@ -325,11 +338,22 @@ router.post('/generate', ...adminOnly, async (req, res) => {
 });
 
 router.get('/:id/download', ...adminOnly, async (req, res) => {
-  const row = await ReportFile.findByPk(req.params.id);
-  if (!row) return res.status(404).json({ error: 'Не найдено' });
-  const fp = path.join(reportsRoot, row.storedName);
-  if (!fs.existsSync(fp)) return res.status(404).json({ error: 'Файл отсутствует на диске' });
-  res.download(fp, row.originalName);
+  const storedName = path.basename(req.params.id);
+  const fp = path.join(reportsRoot, storedName);
+  if (!storedName.endsWith('.xlsx') || !fs.existsSync(fp)) {
+    return res.status(404).json({ error: 'Не найдено' });
+  }
+  let originalName = storedName;
+  const mp = metaPath(storedName);
+  if (fs.existsSync(mp)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(mp, 'utf8'));
+      if (meta.originalName) originalName = meta.originalName;
+    } catch {
+      /* ignore */
+    }
+  }
+  res.download(fp, originalName);
 });
 
 module.exports = router;

@@ -16,7 +16,7 @@ const loginLimiter = rateLimit({
 const loginSchema = z.object({
   login: z.string().min(1, 'Логин обязателен'),
   password: z.string().min(1, 'Пароль обязателен'),
-  role: z.enum(['admin', 'postgraduate', 'professor', 'program_admin']).optional()
+  role: z.enum(['admin', 'student', 'supervisor', 'postgraduate']).optional()
 });
 
 router.post('/login', loginLimiter, validate(loginSchema), async (req, res) => {
