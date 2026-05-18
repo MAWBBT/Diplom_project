@@ -340,6 +340,8 @@ async function initDatabase() {
   try {
     console.log('🔄 Пересоздание схемы БД (sync force)...');
     await db.sync(true);
+    const { dropLegacyTablesQuiet } = require('./drop-legacy-tables-lib');
+    await dropLegacyTablesQuiet(db.sequelize);
 
     const today = new Date();
 
